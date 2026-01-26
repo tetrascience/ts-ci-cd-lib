@@ -1,0 +1,153 @@
+name: Publish npm package
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: Node.js version
+        type: string
+        default: "20"
+        required: false
+      prerelease_tag:
+        description: "Prerelease tag for version suffix and npm dist-tag (e.g., alpha, beta). Leave empty for non-prerelease versions."
+        type: string
+        default: ""
+        required: false
+      run_tests:
+        required: false
+        description: Whether to run tests before publishing
+        type: boolean
+        default: true
+      publish_to_public_npm:
+        description: "Set to true to confirm publishing to public npm registry (https://registry.npmjs.org)"
+        type: boolean
+        default: false
+        required: false
+    secrets:
+      AUTH_TOKEN:
+        required: true
+      REGISTRY:
+        required: true
+      PUBLISH_REGISTRY:
+        required: true
+      NPM_TOKEN:
+        required: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: artifactory-prod
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate configuration for public npm registry
+        env:
+          PUBLISH_REGISTRY: ${{ secrets.PUBLISH_REGISTRY }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PUBLISH_TO_PUBLIC_NPM: ${{ inputs.publish_to_public_npm }}
+        run: |
+          NORMALIZED_REGISTRY=$(echo "$PUBLISH_REGISTRY" | sed 's:/*$::' | tr '[:upper:]' '[:lower:]')
+          if [[ "$NORMALIZED_REGISTRY" == "https://registry.npmjs.org" ]]; then
+            if [[ "$PUBLISH_TO_PUBLIC_NPM" != "true" ]]; then
+              echo "ERROR: PUBLISH_REGISTRY is set to public npm registry but publish_to_public_npm input is not true."
+              echo "To publish to the public npm registry, set the 'publish_to_public_npm' input to true."
+              echo "This is a safety check since npm publishes are immutable after 72 hours."
+              exit 1
+            fi
+            if [[ -z "$NPM_TOKEN" ]]; then
+              echo "ERROR: NPM_TOKEN secret is required when PUBLISH_REGISTRY is https://registry.npmjs.org"
+              exit 1
+            fi
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: yarn
+
+      - name: Configure JFrog Artifactory
+        run: |
+          yarn config set npmRegistryServer "${{ secrets.REGISTRY }}"
+          yarn config set npmAuthIdent "${{ secrets.AUTH_TOKEN }}"
+          yarn config set npmAlwaysAuth true
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Check if Typescript
+        id: check_typescript
+        uses: andstor/file-existence-action@v3
+        with:
+          files: "tsconfig.json"
+
+      - name: Build package
+        if: steps.check_typescript.outputs.files_exists == 'true'
+        run: yarn build
+
+      - name: Run tests
+        if: ${{ inputs.run_tests }}
+        run: yarn test
+
+      # Non-prerelease: Match tag to package version
+      - name: Match tag to package version
+        if: inputs.prerelease_tag == ''
+        id: match-version
+        uses: geritol/match-tag-to-package-version@0.2.0
+        with:
+          TAG_PREFIX: v
+
+      # Prerelease: Update version with prerelease suffix
+      - name: Update version for prerelease
+        if: inputs.prerelease_tag != ''
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          NEW_VERSION="${CURRENT_VERSION}-${{ inputs.prerelease_tag }}.${{ github.run_number }}.${{ github.run_attempt }}"
+          npm version $NEW_VERSION --no-git-tag-version
+          echo "Publishing version: $NEW_VERSION"
+
+      # Public registry: Replace @tetrascience with @tetrascience-npm
+      - name: Update package scope for public registry
+        env:
+          PUBLISH_REGISTRY: ${{ secrets.PUBLISH_REGISTRY }}
+        run: |
+          NORMALIZED_REGISTRY=$(echo "$PUBLISH_REGISTRY" | sed 's:/*$::' | tr '[:upper:]' '[:lower:]')
+          if [[ "$NORMALIZED_REGISTRY" == "https://registry.npmjs.org" ]]; then
+            PACKAGE_NAME=$(node -p "require('./package.json').name")
+            if [[ $PACKAGE_NAME == @tetrascience/* ]]; then
+              NEW_PACKAGE_NAME=$(echo $PACKAGE_NAME | sed 's/@tetrascience\//@tetrascience-npm\//')
+              echo "Updating package name from $PACKAGE_NAME to $NEW_PACKAGE_NAME"
+              npm pkg set name="$NEW_PACKAGE_NAME"
+            else
+              echo "Package name does not start with @tetrascience/, skipping scope update"
+            fi
+          else
+            echo "Not publishing to public registry, skipping scope update"
+          fi
+
+      - name: Configure registry for publishing
+        env:
+          PUBLISH_REGISTRY: ${{ secrets.PUBLISH_REGISTRY }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          NORMALIZED_REGISTRY=$(echo "$PUBLISH_REGISTRY" | sed 's:/*$::' | tr '[:upper:]' '[:lower:]')
+          if [[ "$NORMALIZED_REGISTRY" == "https://registry.npmjs.org" ]]; then
+            echo "Configuring public npm registry"
+            yarn config set npmRegistryServer "https://registry.npmjs.org"
+            yarn config set npmAuthToken "$NPM_TOKEN"
+            yarn config unset npmAuthIdent
+            yarn config set npmAlwaysAuth true
+          else
+            echo "Configuring private registry (JFrog Artifactory)"
+            yarn config set npmRegistryServer "$PUBLISH_REGISTRY"
+          fi
+
+      # Non-prerelease: Publish only if tag matches version
+      - name: Publish package
+        if: inputs.prerelease_tag == '' && steps.match-version.outputs.PACKAGE_VERSION == steps.match-version.outputs.TAG_VERSION
+        run: yarn npm publish
+
+      # Prerelease: Publish with dist-tag
+      - name: Publish package (prerelease)
+        if: inputs.prerelease_tag != ''
+        run: yarn npm publish --tag ${{ inputs.prerelease_tag }}
