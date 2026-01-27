@@ -36,7 +36,6 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: artifactory-prod
 
     steps:
       - uses: actions/checkout@v4
