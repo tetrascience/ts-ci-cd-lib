@@ -152,9 +152,26 @@ jobs:
       # Non-prerelease: Publish only if tag matches version
       - name: Publish package
         if: inputs.prerelease_tag == '' && steps.match-version.outputs.PACKAGE_VERSION == steps.match-version.outputs.TAG_VERSION
-        run: yarn npm publish
+        env:
+          PUBLISH_REGISTRY: ${{ secrets.PUBLISH_REGISTRY }}
+        run: |
+          NORMALIZED_REGISTRY=$(echo "$PUBLISH_REGISTRY" | sed 's:/*$::' | tr '[:upper:]' '[:lower:]')
+          if [[ "$NORMALIZED_REGISTRY" == "https://registry.npmjs.org" ]]; then
+            yarn npm publish --access public
+          else
+            yarn npm publish
+          fi
 
       # Prerelease: Publish with dist-tag
       - name: Publish package (prerelease)
         if: inputs.prerelease_tag != ''
-        run: yarn npm publish --tag ${{ inputs.prerelease_tag }}
+        env:
+          PUBLISH_REGISTRY: ${{ secrets.PUBLISH_REGISTRY }}
+          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+        run: |
+          NORMALIZED_REGISTRY=$(echo "$PUBLISH_REGISTRY" | sed 's:/*$::' | tr '[:upper:]' '[:lower:]')
+          if [[ "$NORMALIZED_REGISTRY" == "https://registry.npmjs.org" ]]; then
+            yarn npm publish --tag "$PRERELEASE_TAG" --access public
+          else
+            yarn npm publish --tag "$PRERELEASE_TAG"
+          fi
