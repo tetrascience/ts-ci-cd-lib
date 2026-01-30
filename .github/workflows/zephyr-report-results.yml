@@ -1,0 +1,99 @@
+name: Report Test Results to Zephyr Scale
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: Node.js version
+        type: string
+        default: "20"
+        required: false
+      junit_paths:
+        description: "Comma-separated list of JUnit XML file paths"
+        type: string
+        required: true
+      zephyr_project_key:
+        description: "Jira project key"
+        type: string
+        default: "SW"
+        required: false
+      zephyr_test_cycle_key:
+        description: "Existing test cycle key to use (optional, creates new if not set)"
+        type: string
+        default: ""
+        required: false
+      zephyr_cycle_name_prefix:
+        description: "Prefix for auto-generated cycle names"
+        type: string
+        default: "E2E"
+        required: false
+      zephyr_folders:
+        description: "JSON object mapping directory patterns to app labels"
+        type: string
+        default: "{}"
+        required: false
+      zephyr_labels:
+        description: "Comma-separated labels for test cycles"
+        type: string
+        default: "e2e,playwright,automated"
+        required: false
+      os:
+        description: "Operating system for test environment"
+        type: string
+        default: "ubuntu-latest"
+        required: false
+    secrets:
+      ZEPHYR_TOKEN:
+        description: "Zephyr Scale API token"
+        required: true
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install tsx
+        run: npm install -g tsx
+
+      - name: Download test results artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-test-results"
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Checkout ts-ci-cd-lib
+        uses: actions/checkout@v4
+        with:
+          repository: tetrascience/ts-ci-cd-lib
+          path: .ts-ci-cd-lib
+          token: ${{ github.token }}
+
+      - name: Install script dependencies
+        run: |
+          cd .ts-ci-cd-lib/scripts/zephyr
+          npm init -y
+          npm install xml2js
+
+      - name: Report results to Zephyr
+        env:
+          ZEPHYR_TOKEN: ${{ secrets.ZEPHYR_TOKEN }}
+          ZEPHYR_PROJECT_KEY: ${{ inputs.zephyr_project_key }}
+          JUNIT_PATHS: ${{ inputs.junit_paths }}
+          ZEPHYR_TEST_CYCLE_KEY: ${{ inputs.zephyr_test_cycle_key }}
+          ZEPHYR_CYCLE_NAME_PREFIX: ${{ inputs.zephyr_cycle_name_prefix }}
+          ZEPHYR_FOLDERS: ${{ inputs.zephyr_folders }}
+          ZEPHYR_LABELS: ${{ inputs.zephyr_labels }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          PR_NUMBER: ${{ github.event.pull_request.number || 'n/a' }}
+          OS: ${{ inputs.os }}
+        run: tsx .ts-ci-cd-lib/scripts/zephyr/report-zephyr-results.ts
+

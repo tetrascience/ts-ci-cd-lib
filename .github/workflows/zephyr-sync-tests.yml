@@ -1,0 +1,111 @@
+name: Sync Tests to Zephyr Scale
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: Node.js version
+        type: string
+        default: "20"
+        required: false
+      test_dirs:
+        description: "Comma-separated list of test directories to scan"
+        type: string
+        required: true
+      test_file_pattern:
+        description: "File pattern to match test files"
+        type: string
+        default: ".spec.ts"
+        required: false
+      zephyr_project_key:
+        description: "Jira project key"
+        type: string
+        default: "SW"
+        required: false
+      zephyr_folders:
+        description: "JSON object mapping directory patterns to Zephyr folder names"
+        type: string
+        default: "{}"
+        required: false
+      zephyr_default_folder:
+        description: "Default Zephyr folder name if no pattern matches"
+        type: string
+        default: ""
+        required: false
+      zephyr_labels:
+        description: "Comma-separated labels to add to test cases"
+        type: string
+        default: "e2e,playwright,automated"
+        required: false
+      shared_test_dir:
+        description: "Directory containing shared test files (optional)"
+        type: string
+        default: ""
+        required: false
+    secrets:
+      ZEPHYR_TOKEN:
+        description: "Zephyr Scale API token"
+        required: true
+      AUTH_TOKEN:
+        description: "JFrog Artifactory auth token for npm packages"
+        required: false
+      REGISTRY:
+        description: "JFrog Artifactory npm registry URL"
+        required: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ github.token }}
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install tsx
+        run: npm install -g tsx
+
+      - name: Configure npm registry (if provided)
+        if: ${{ secrets.REGISTRY != '' && secrets.AUTH_TOKEN != '' }}
+        run: |
+          npm config set registry "${{ secrets.REGISTRY }}"
+          npm config set //$(echo "${{ secrets.REGISTRY }}" | sed 's|https://||'):_authToken "${{ secrets.AUTH_TOKEN }}"
+
+      - name: Checkout ts-ci-cd-lib
+        uses: actions/checkout@v4
+        with:
+          repository: tetrascience/ts-ci-cd-lib
+          path: .ts-ci-cd-lib
+          token: ${{ github.token }}
+
+      - name: Install script dependencies
+        run: |
+          cd .ts-ci-cd-lib/scripts/zephyr
+          npm init -y
+          npm install xml2js
+
+      - name: Sync tests to Zephyr
+        env:
+          ZEPHYR_TOKEN: ${{ secrets.ZEPHYR_TOKEN }}
+          ZEPHYR_PROJECT_KEY: ${{ inputs.zephyr_project_key }}
+          TEST_DIRS: ${{ inputs.test_dirs }}
+          TEST_FILE_PATTERN: ${{ inputs.test_file_pattern }}
+          ZEPHYR_FOLDERS: ${{ inputs.zephyr_folders }}
+          ZEPHYR_DEFAULT_FOLDER: ${{ inputs.zephyr_default_folder }}
+          ZEPHYR_LABELS: ${{ inputs.zephyr_labels }}
+          SHARED_TEST_DIR: ${{ inputs.shared_test_dir }}
+        run: tsx .ts-ci-cd-lib/scripts/zephyr/sync-zephyr.ts
+
+      - name: Commit updated test files
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: sync Zephyr test case IDs"
+          file_pattern: "**/*.spec.ts **/*.test.ts"
+
