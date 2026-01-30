@@ -167,10 +167,11 @@ jobs:
         if: inputs.prerelease_tag != ''
         env:
           PUBLISH_REGISTRY: ${{ secrets.PUBLISH_REGISTRY }}
+          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
         run: |
           NORMALIZED_REGISTRY=$(echo "$PUBLISH_REGISTRY" | sed 's:/*$::' | tr '[:upper:]' '[:lower:]')
           if [[ "$NORMALIZED_REGISTRY" == "https://registry.npmjs.org" ]]; then
-            yarn npm publish --tag ${{ inputs.prerelease_tag }} --access public
+            yarn npm publish --tag "$PRERELEASE_TAG" --access public
           else
-            yarn npm publish --tag ${{ inputs.prerelease_tag }}
+            yarn npm publish --tag "$PRERELEASE_TAG"
           fi
