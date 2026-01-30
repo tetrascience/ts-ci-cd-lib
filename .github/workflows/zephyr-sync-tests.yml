@@ -58,14 +58,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Note: This checkout is safe because workflow_call workflows can only be invoked
+      # by workflows in the same repository or organization. The ref is needed to check out
+      # the correct branch for reading test files and committing Zephyr ID updates.
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           token: ${{ github.token }}
           ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ inputs.node_version }}
 
@@ -74,12 +77,15 @@ jobs:
 
       - name: Configure npm registry (if provided)
         if: ${{ secrets.REGISTRY != '' && secrets.AUTH_TOKEN != '' }}
+        env:
+          NPM_REGISTRY: ${{ secrets.REGISTRY }}
+          NPM_AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
         run: |
-          npm config set registry "${{ secrets.REGISTRY }}"
-          npm config set //$(echo "${{ secrets.REGISTRY }}" | sed 's|https://||'):_authToken "${{ secrets.AUTH_TOKEN }}"
+          npm config set registry "$NPM_REGISTRY"
+          npm config set "//${NPM_REGISTRY#https://}:_authToken" "$NPM_AUTH_TOKEN"
 
       - name: Checkout ts-ci-cd-lib
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: tetrascience/ts-ci-cd-lib
           path: .ts-ci-cd-lib
@@ -104,7 +110,7 @@ jobs:
         run: tsx .ts-ci-cd-lib/scripts/zephyr/sync-zephyr.ts
 
       - name: Commit updated test files
-        uses: stefanzweifel/git-auto-commit-action@v5
+        uses: stefanzweifel/git-auto-commit-action@b863ae1933cb653a53c021fe36dbb774e1fb9403 # v5
         with:
           commit_message: "chore: sync Zephyr test case IDs"
           file_pattern: "**/*.spec.ts **/*.test.ts"
