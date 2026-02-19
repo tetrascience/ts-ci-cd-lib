@@ -73,7 +73,9 @@ jobs:
           REGISTRY: ${{ secrets.REGISTRY }}
         run: |
           if [[ -n "$AUTH_TOKEN" ]]; then
-            yarn config set npmRegistryServer "$REGISTRY"
+            # Default to public npm registry if REGISTRY is not provided
+            EFFECTIVE_REGISTRY="${REGISTRY:-https://registry.npmjs.org}"
+            yarn config set npmRegistryServer "$EFFECTIVE_REGISTRY"
             yarn config set npmAuthIdent "$AUTH_TOKEN"
             yarn config set npmAlwaysAuth true
           else
