@@ -6,6 +6,7 @@ Reusable CI/CD workflows for TetraScience repositories.
 
 - [Workflows](#workflows)
   - [publish-npm-package](#publish-npm-package)
+  - [check-links](#check-links)
 
 ## Workflows
 
@@ -61,3 +62,56 @@ To publish to the public npm registry (`https://registry.npmjs.org`):
 3. Set `PUBLISH_REGISTRY` to `https://registry.npmjs.org`
 
 The workflow will automatically update the package scope from `@tetrascience` to `@tetrascience-npm` when publishing to the public registry.
+
+### check-links
+
+Reusable workflow for checking broken links in markdown files using [lychee](https://lychee.cli.rs/). The calling repository provides its own `lychee.toml` configuration file in the repo root.
+
+#### Usage
+
+```yaml
+name: Link Check
+
+on:
+  push:
+    branches: [main]
+    paths: ["**/*.md", "lychee.toml", ".lycheeignore"]
+  pull_request:
+    paths: ["**/*.md", "lychee.toml", ".lycheeignore"]
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-links:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/check-links.yml@main
+```
+
+#### Inputs
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `lychee_args` | Arguments passed to lychee. The calling repo's `lychee.toml` handles most configuration. | No | `"--cache --max-cache-age 1d ."` |
+
+#### Secrets
+
+No secrets required. The workflow uses the automatically available `GITHUB_TOKEN` for authenticating with the GitHub API (to avoid rate limits when checking GitHub links).
+
+#### Calling Repo Setup
+
+Create a `lychee.toml` file in your repository root:
+
+```toml
+max_concurrency = 4
+max_retries = 3
+timeout = 20
+accept = [200, 204, 301, 429]
+exclude = [
+  "^http://localhost",
+  "^http://127\\.0\\.0\\.1",
+  "^https?://example\\.com",
+]
+```
