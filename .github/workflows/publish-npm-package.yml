@@ -162,10 +162,17 @@ jobs:
         if: inputs.prerelease_tag == '' && steps.match-version.outputs.PACKAGE_VERSION == steps.match-version.outputs.TAG_VERSION
         env:
           PUBLISH_REGISTRY: ${{ secrets.PUBLISH_REGISTRY }}
+          REPO_VISIBILITY: ${{ github.event.repository.visibility }}
         run: |
           NORMALIZED_REGISTRY=$(echo "$PUBLISH_REGISTRY" | sed 's:/*$::' | tr '[:upper:]' '[:lower:]')
           if [[ "$NORMALIZED_REGISTRY" == "https://registry.npmjs.org" ]]; then
-            npm publish --provenance --access public
+            PROVENANCE_FLAG=""
+            if [[ "$REPO_VISIBILITY" == "public" ]]; then
+              PROVENANCE_FLAG="--provenance"
+            else
+              echo "Skipping --provenance (repo visibility: $REPO_VISIBILITY, provenance requires public repos)"
+            fi
+            npm publish $PROVENANCE_FLAG --access public
           else
             yarn npm publish
           fi
@@ -176,10 +183,17 @@ jobs:
         env:
           PUBLISH_REGISTRY: ${{ secrets.PUBLISH_REGISTRY }}
           PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+          REPO_VISIBILITY: ${{ github.event.repository.visibility }}
         run: |
           NORMALIZED_REGISTRY=$(echo "$PUBLISH_REGISTRY" | sed 's:/*$::' | tr '[:upper:]' '[:lower:]')
           if [[ "$NORMALIZED_REGISTRY" == "https://registry.npmjs.org" ]]; then
-            npm publish --provenance --tag "$PRERELEASE_TAG" --access public
+            PROVENANCE_FLAG=""
+            if [[ "$REPO_VISIBILITY" == "public" ]]; then
+              PROVENANCE_FLAG="--provenance"
+            else
+              echo "Skipping --provenance (repo visibility: $REPO_VISIBILITY, provenance requires public repos)"
+            fi
+            npm publish $PROVENANCE_FLAG --tag "$PRERELEASE_TAG" --access public
           else
             yarn npm publish --tag "$PRERELEASE_TAG"
           fi
