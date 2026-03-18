@@ -6,8 +6,7 @@ on:
       environment:
         description: "Target environment (e.g. predev5, dev)"
         type: string
-        default: "predev5"
-        required: false
+        required: true
       deploy_paths:
         description: "Space-separated glob patterns — deploy only if changed files match. Empty string = never deploy."
         type: string
