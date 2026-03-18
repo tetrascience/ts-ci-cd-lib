@@ -8,11 +8,6 @@ on:
         type: string
         default: "predev5"
         required: false
-      deploy_before_e2e:
-        description: "Push current commit to env branch and wait for deploy before running E2E tests"
-        type: boolean
-        default: true
-        required: false
       deploy_paths:
         description: "Space-separated glob patterns — deploy only if changed files match (e.g. 'src/** package.json')"
         type: string
@@ -71,7 +66,6 @@ permissions:
 
 jobs:
   check-changes:
-    if: ${{ inputs.deploy_before_e2e }}
     runs-on: ubuntu-latest
     outputs:
       should_deploy: ${{ steps.check.outputs.should_deploy }}
@@ -86,7 +80,6 @@ jobs:
           DEPLOY_PATHS: ${{ inputs.deploy_paths }}
         run: |
           set -euo pipefail
-          # Get the merge base to compare against
           if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
             BASE="origin/$GITHUB_BASE_REF"
           else
@@ -103,7 +96,6 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED_FILES"
 
-          # Check if any changed file matches the deploy paths
           for pattern in $DEPLOY_PATHS; do
             while IFS= read -r file; do
               if [[ -n "$file" ]] && [[ "$file" == $pattern ]]; then
@@ -119,7 +111,7 @@ jobs:
 
   deploy:
     needs: check-changes
-    if: ${{ inputs.deploy_before_e2e && needs.check-changes.outputs.should_deploy == 'true' }}
+    if: ${{ needs.check-changes.outputs.should_deploy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -169,7 +161,7 @@ jobs:
     if: |
       always() &&
       (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
-      (needs.check-changes.result == 'success' || needs.check-changes.result == 'skipped')
+      needs.check-changes.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
 
@@ -269,7 +261,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Convert flat {"KEY":"value"} to CodeBuild format [{"name":"KEY","value":"value"}]
           CALLER_VARS=$(echo "$CALLER_ENV_VARS" | jq '[to_entries[] | {name: .key, value: .value}]')
 
           BUILTIN_VARS=$(jq -nc '[
