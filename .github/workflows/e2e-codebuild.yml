@@ -45,10 +45,14 @@ on:
         description: "PAT with cross-repo access to ts-cloudformation-service"
         required: true
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) + 5 }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -98,17 +102,20 @@ jobs:
         with:
           aws-region: ${{ steps.env.outputs.region }}
           role-to-assume: arn:aws:iam::${{ steps.env.outputs.account }}:role/gha-tdp-e2e-${{ steps.env.outputs.env }}
-          role-session-name: e2e-${{ github.repository_owner }}-${{ github.event.repository.name }}
+          role-session-name: e2e-codebuild
           role-skip-session-tagging: true
 
       - name: Upload source to S3
         id: source
+        env:
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPO_NAME: ${{ github.repository }}
+          SOURCE_BUCKET: ${{ steps.env.outputs.source_bucket }}
         run: |
-          COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          S3_KEY="${{ github.repository }}/${COMMIT_SHA}.zip"
+          S3_KEY="${REPO_NAME}/${COMMIT_SHA}.zip"
           zip -r -q /tmp/source.zip . -x '.infra/*' '.git/*'
-          aws s3 cp /tmp/source.zip "s3://${{ steps.env.outputs.source_bucket }}/${S3_KEY}"
-          echo "s3_location=${{ steps.env.outputs.source_bucket }}/${S3_KEY}" >> "$GITHUB_OUTPUT"
+          aws s3 cp /tmp/source.zip "s3://${SOURCE_BUCKET}/${S3_KEY}"
+          echo "s3_location=${SOURCE_BUCKET}/${S3_KEY}" >> "$GITHUB_OUTPUT"
 
       - name: Start CodeBuild
         id: codebuild
@@ -118,32 +125,41 @@ jobs:
           JFROG_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
           JFROG_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
           CALLER_ENV_VARS: ${{ inputs.env_vars_json }}
+          S3_LOCATION: ${{ steps.source.outputs.s3_location }}
+          BUILDSPEC: ${{ inputs.buildspec }}
+          IMAGE_OVERRIDE: ${{ inputs.image_override }}
+          COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
+          TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
         run: |
-          # Merge built-in vars with caller-provided vars
+          # Build env vars array — only include JFrog when secrets are set
           BUILTIN_VARS=$(jq -nc '[
             {"name":"E2E_BASE_URL","value":env.BASE_URL},
-            {"name":"SSM_ENV","value":env.SSM_ENV},
-            {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
-            {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
+            {"name":"SSM_ENV","value":env.SSM_ENV}
           ]')
+          if [[ -n "$JFROG_URL" ]]; then
+            BUILTIN_VARS=$(echo "$BUILTIN_VARS" | jq '. + [
+              {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
+              {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
+            ]')
+          fi
           ENV_VARS=$(echo "$BUILTIN_VARS" | jq --argjson caller "$CALLER_ENV_VARS" '. + $caller')
 
           # Build start-build command
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
             --source-type-override S3
-            --source-location-override "${{ steps.source.outputs.s3_location }}"
-            --buildspec-override "${{ inputs.buildspec }}"
+            --source-location-override "$S3_LOCATION"
+            --buildspec-override "$BUILDSPEC"
             --environment-variables-override "$ENV_VARS")
 
-          if [[ -n "${{ inputs.image_override }}" ]]; then
-            CMD+=(--image-override "${{ inputs.image_override }}")
+          if [[ -n "$IMAGE_OVERRIDE" ]]; then
+            CMD+=(--image-override "$IMAGE_OVERRIDE")
           fi
-          if [[ -n "${{ inputs.compute_type_override }}" ]]; then
-            CMD+=(--compute-type-override "${{ inputs.compute_type_override }}")
+          if [[ -n "$COMPUTE_TYPE_OVERRIDE" ]]; then
+            CMD+=(--compute-type-override "$COMPUTE_TYPE_OVERRIDE")
           fi
-          if [[ "${{ inputs.timeout_minutes }}" != "15" ]]; then
-            CMD+=(--timeout-in-minutes-override "${{ inputs.timeout_minutes }}")
+          if [[ "$TIMEOUT_MINUTES" != "15" ]]; then
+            CMD+=(--timeout-in-minutes-override "$TIMEOUT_MINUTES")
           fi
 
           startBuild=$("${CMD[@]}")
@@ -153,9 +169,9 @@ jobs:
 
       - name: Wait for CodeBuild
         env:
+          BUILD_ID: ${{ steps.codebuild.outputs.build_id }}
           TIMEOUT: ${{ inputs.timeout_minutes }}
         run: |
-          BUILD_ID="${{ steps.codebuild.outputs.build_id }}"
           MAX_SECONDS=$((TIMEOUT * 60))
           while [[ $SECONDS -le $MAX_SECONDS ]]; do
             sleep 15
