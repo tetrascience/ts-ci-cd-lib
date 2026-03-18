@@ -1,0 +1,179 @@
+name: E2E Tests (CodeBuild)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment (e.g. predev5, dev)"
+        type: string
+        default: "predev5"
+        required: false
+      buildspec:
+        description: "Path to the buildspec file in the caller repo"
+        type: string
+        default: "buildspec.e2e.yml"
+        required: false
+      env_vars_json:
+        description: "JSON array of {name, value} objects to pass as CodeBuild environment variables"
+        type: string
+        default: "[]"
+        required: false
+      image_override:
+        description: "Override the CodeBuild base image (e.g. mcr.microsoft.com/playwright:v1.52.0-noble)"
+        type: string
+        required: false
+      compute_type_override:
+        description: "Override the CodeBuild compute type (e.g. BUILD_GENERAL1_MEDIUM for 7GB RAM)"
+        type: string
+        required: false
+      timeout_minutes:
+        description: "Max minutes to wait for CodeBuild to finish"
+        type: number
+        default: 15
+        required: false
+      infra_config_ref:
+        description: "Git ref for ts-cloudformation-service environment config (defaults to development)"
+        type: string
+        default: "development"
+        required: false
+    secrets:
+      JFROG_ARTIFACTORY_NPM_VIRTUAL_URL:
+        required: false
+      JFROG_ARTIFACTORY_READ_NPM_AUTH:
+        required: false
+      GITHUB_PAT:
+        description: "PAT with cross-repo access to ts-cloudformation-service"
+        required: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Checkout environment config
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: tetrascience/ts-cloudformation-service
+          ref: ${{ inputs.infra_config_ref }}
+          token: ${{ secrets.GITHUB_PAT }}
+          sparse-checkout: infrastructure/tdp-backend-e2e-environments.yml
+          sparse-checkout-cone-mode: false
+          path: .infra
+
+      - name: Resolve environment
+        id: env
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          CONFIG=".infra/infrastructure/tdp-backend-e2e-environments.yml"
+          ENV="$TARGET_ENV"
+
+          ACCOUNT=$(yq -r ".environments.${ENV}.account" "$CONFIG")
+          REGION=$(yq -r ".environments.${ENV}.region // .defaults.region" "$CONFIG")
+          BASE_URL=$(yq -r ".environments.${ENV}.base_url // \"\"" "$CONFIG")
+          SSM_ENV=$(yq -r ".environments.${ENV}.ssm_env // .defaults.ssm_env" "$CONFIG")
+
+          if [[ "$ACCOUNT" == "null" || -z "$ACCOUNT" ]]; then
+            echo "::error::Unknown environment: $ENV"
+            exit 1
+          fi
+
+          if [[ -z "$BASE_URL" ]]; then
+            PATTERN=$(yq -r ".defaults.base_url_pattern" "$CONFIG")
+            BASE_URL="${PATTERN//\{env\}/$ENV}"
+          fi
+
+          echo "env=$ENV" >> "$GITHUB_OUTPUT"
+          echo "account=$ACCOUNT" >> "$GITHUB_OUTPUT"
+          echo "region=$REGION" >> "$GITHUB_OUTPUT"
+          echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
+          echo "ssm_env=$SSM_ENV" >> "$GITHUB_OUTPUT"
+          echo "source_bucket=tdp-backend-e2e-source-${ACCOUNT}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          aws-region: ${{ steps.env.outputs.region }}
+          role-to-assume: arn:aws:iam::${{ steps.env.outputs.account }}:role/gha-tdp-e2e-${{ steps.env.outputs.env }}
+          role-session-name: e2e-${{ github.repository_owner }}-${{ github.event.repository.name }}
+          role-skip-session-tagging: true
+
+      - name: Upload source to S3
+        id: source
+        run: |
+          COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          S3_KEY="${{ github.repository }}/${COMMIT_SHA}.zip"
+          zip -r -q /tmp/source.zip . -x '.infra/*' '.git/*'
+          aws s3 cp /tmp/source.zip "s3://${{ steps.env.outputs.source_bucket }}/${S3_KEY}"
+          echo "s3_location=${{ steps.env.outputs.source_bucket }}/${S3_KEY}" >> "$GITHUB_OUTPUT"
+
+      - name: Start CodeBuild
+        id: codebuild
+        env:
+          BASE_URL: ${{ steps.env.outputs.base_url }}
+          SSM_ENV: ${{ steps.env.outputs.ssm_env }}
+          JFROG_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
+          JFROG_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+          CALLER_ENV_VARS: ${{ inputs.env_vars_json }}
+        run: |
+          # Merge built-in vars with caller-provided vars
+          BUILTIN_VARS=$(jq -nc '[
+            {"name":"E2E_BASE_URL","value":env.BASE_URL},
+            {"name":"SSM_ENV","value":env.SSM_ENV},
+            {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
+            {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
+          ]')
+          ENV_VARS=$(echo "$BUILTIN_VARS" | jq --argjson caller "$CALLER_ENV_VARS" '. + $caller')
+
+          # Build start-build command
+          CMD=(aws codebuild start-build
+            --project-name tdp-backend-e2e
+            --source-type-override S3
+            --source-location-override "${{ steps.source.outputs.s3_location }}"
+            --buildspec-override "${{ inputs.buildspec }}"
+            --environment-variables-override "$ENV_VARS")
+
+          if [[ -n "${{ inputs.image_override }}" ]]; then
+            CMD+=(--image-override "${{ inputs.image_override }}")
+          fi
+          if [[ -n "${{ inputs.compute_type_override }}" ]]; then
+            CMD+=(--compute-type-override "${{ inputs.compute_type_override }}")
+          fi
+          if [[ "${{ inputs.timeout_minutes }}" != "15" ]]; then
+            CMD+=(--timeout-in-minutes-override "${{ inputs.timeout_minutes }}")
+          fi
+
+          startBuild=$("${CMD[@]}")
+          buildId=$(echo "$startBuild" | jq -r '.build.id')
+          echo "build_id=$buildId" >> "$GITHUB_OUTPUT"
+          echo "Started CodeBuild (tdp-backend-e2e): $buildId"
+
+      - name: Wait for CodeBuild
+        env:
+          TIMEOUT: ${{ inputs.timeout_minutes }}
+        run: |
+          BUILD_ID="${{ steps.codebuild.outputs.build_id }}"
+          MAX_SECONDS=$((TIMEOUT * 60))
+          while [[ $SECONDS -le $MAX_SECONDS ]]; do
+            sleep 15
+            buildInfo=$(aws codebuild batch-get-builds --ids "$BUILD_ID")
+            buildStatus=$(echo "$buildInfo" | jq -r '.builds[0].buildStatus')
+            if [[ "$buildStatus" != "IN_PROGRESS" ]]; then
+              break
+            fi
+          done
+          echo "Build logs: $(echo "$buildInfo" | jq -r '.builds[0].logs.deepLink')"
+          if [[ $SECONDS -gt $MAX_SECONDS ]]; then
+            echo "::error::Timeout exceeded ($TIMEOUT min)"
+            exit 1
+          fi
+          if [[ "$buildStatus" == "SUCCEEDED" ]]; then
+            echo "E2E tests passed"
+          else
+            echo "::error::E2E tests failed — status: $buildStatus"
+            echo "::error::See CloudWatch logs: $(echo "$buildInfo" | jq -r '.builds[0].logs.deepLink')"
+            exit 1
+          fi
