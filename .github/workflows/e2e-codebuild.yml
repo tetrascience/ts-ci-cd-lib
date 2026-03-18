@@ -38,9 +38,9 @@ on:
         required: false
     secrets:
       JFROG_ARTIFACTORY_NPM_VIRTUAL_URL:
-        required: false
+        required: true
       JFROG_ARTIFACTORY_READ_NPM_AUTH:
-        required: false
+        required: true
       GITHUB_PAT:
         description: "PAT with cross-repo access to ts-cloudformation-service"
         required: true
@@ -129,22 +129,15 @@ jobs:
           BUILDSPEC: ${{ inputs.buildspec }}
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
           COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
-          TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
         run: |
-          # Build env vars array — only include JFrog when secrets are set
           BUILTIN_VARS=$(jq -nc '[
             {"name":"E2E_BASE_URL","value":env.BASE_URL},
-            {"name":"SSM_ENV","value":env.SSM_ENV}
+            {"name":"SSM_ENV","value":env.SSM_ENV},
+            {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
+            {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
-          if [[ -n "$JFROG_URL" ]]; then
-            BUILTIN_VARS=$(echo "$BUILTIN_VARS" | jq '. + [
-              {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
-              {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
-            ]')
-          fi
           ENV_VARS=$(echo "$BUILTIN_VARS" | jq --argjson caller "$CALLER_ENV_VARS" '. + $caller')
 
-          # Build start-build command
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
             --source-type-override S3
