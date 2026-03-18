@@ -34,6 +34,7 @@ jobs:
     uses: tetrascience/ts-ci-cd-lib/.github/workflows/e2e-codebuild.yml@main
     with:
       environment: predev5
+      deploy_paths: 'src/** migrations/** package.json yarn.lock Dockerfile'
     secrets:
       JFROG_ARTIFACTORY_NPM_VIRTUAL_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
       JFROG_ARTIFACTORY_READ_NPM_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
@@ -41,12 +42,12 @@ jobs:
 ```
 
 This will:
-1. Push the current commit to the `predev5` branch (triggering the CI/CD deploy)
-2. Wait for the deploy to complete
-3. Run `yarn test:e2e` in CodeBuild against the freshly deployed service
+1. Check if any changed files match `deploy_paths`
+2. If matched, push to the `predev5` branch and wait for the deploy workflow to complete
+3. Run `yarn test:e2e` in CodeBuild against the (freshly deployed or current) service
 4. Stream the full test output into the GHA step log
 
-#### With custom env vars and test command
+#### With custom env vars
 
 ```yaml
 jobs:
@@ -54,7 +55,7 @@ jobs:
     uses: tetrascience/ts-ci-cd-lib/.github/workflows/e2e-codebuild.yml@main
     with:
       environment: predev5
-      test_command: yarn test:e2e --runInBand
+      deploy_paths: 'src/** package.json yarn.lock'
       env_vars_json: |
         {
           "E2E_ORG_SLUG": "tetrascience",
@@ -74,6 +75,7 @@ jobs:
     uses: tetrascience/ts-ci-cd-lib/.github/workflows/e2e-codebuild.yml@main
     with:
       environment: predev5
+      deploy_paths: 'src/** package.json yarn.lock'
       image_override: mcr.microsoft.com/playwright:v1.52.0-noble
       compute_type_override: BUILD_GENERAL1_MEDIUM
       buildspec: buildspec.e2e.yml  # use your own buildspec
@@ -83,7 +85,7 @@ jobs:
       GITHUB_PAT: ${{ secrets.ARTIFACT_BUILD_GITHUB_TS_DEVOPS_PAT }}
 ```
 
-#### Skip deploy (test against current deployment)
+#### E2E only (never deploy)
 
 ```yaml
 jobs:
@@ -91,7 +93,7 @@ jobs:
     uses: tetrascience/ts-ci-cd-lib/.github/workflows/e2e-codebuild.yml@main
     with:
       environment: predev5
-      deploy_before_e2e: false
+      deploy_paths: ''  # empty = never deploy, just run tests
     secrets:
       JFROG_ARTIFACTORY_NPM_VIRTUAL_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
       JFROG_ARTIFACTORY_READ_NPM_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
@@ -102,10 +104,9 @@ jobs:
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `environment` | Target environment (e.g. predev5, dev) | No | `predev5` |
-| `deploy_before_e2e` | Push to env branch and wait for CI deploy before testing | No | `true` |
-| `ci_workflow` | CI workflow filename to wait for during deploy | No | `ci.yml` |
-| `test_command` | Test command for the default buildspec | No | `yarn test:e2e` |
+| `environment` | Target environment (e.g. predev5, dev) | **Yes** | |
+| `deploy_paths` | Space-separated globs — deploy if changed files match. Empty = never deploy. | **Yes** | |
+| `deploy_workflow` | Workflow file that builds and deploys the service (waited on after pushing to env branch) | No | `ci.yml` |
 | `buildspec` | Path to a custom buildspec in the caller repo (empty = use shared default) | No | `""` |
 | `env_vars_json` | JSON object of env vars to pass to CodeBuild | No | `{}` |
 | `image_override` | Override CodeBuild base image | No | |
@@ -122,13 +123,17 @@ jobs:
 
 #### How it works
 
-The workflow has two jobs:
+The workflow has three jobs:
 
-**deploy** (optional, controlled by `deploy_before_e2e`):
+**check-changes** (skipped if `deploy_paths` is empty):
+1. Compares changed files against `deploy_paths` globs
+2. Outputs `should_deploy=true` if any service code changed
+
+**deploy** (only if `should_deploy=true`):
 1. Force-pushes the current commit to the target environment branch (e.g. `predev5`) using `GITHUB_PAT`
-2. Waits for the repo's CI workflow to build, push, and deploy the service
+2. Waits for the repo's deploy workflow (default: `ci.yml`) to build, push, and deploy the service
 
-**e2e** (runs after deploy succeeds or is skipped):
+**e2e** (always runs after deploy succeeds or is skipped):
 1. Checks out the caller repo and the environment config from `ts-cloudformation-service`
 2. Resolves the target environment (account, region, base URL, SSM prefix)
 3. Assumes the `gha-tdp-e2e-{env}` OIDC role in the target AWS account
@@ -145,7 +150,9 @@ When no custom `buildspec` is provided, the workflow uses [`buildspecs/e2e-defau
 - Sets up Node 20, corepack, and Yarn 4
 - Configures the JFrog npm registry via `yarn config set`
 - Runs `yarn install --immutable`
-- Executes the test command (`E2E_TEST_COMMAND` env var, defaults to `yarn test:e2e`)
+- Runs `yarn test:e2e`
+
+Callers who need a different test command or setup should provide their own buildspec via the `buildspec` input.
 
 #### Infrastructure prerequisites
 
