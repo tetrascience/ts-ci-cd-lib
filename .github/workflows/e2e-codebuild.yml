@@ -8,6 +8,16 @@ on:
         type: string
         default: "predev5"
         required: false
+      deploy_before_e2e:
+        description: "Push current commit to env branch and wait for deploy before running E2E tests"
+        type: boolean
+        default: true
+        required: false
+      ci_workflow:
+        description: "Name of the CI workflow file to wait for (e.g. ci.yml)"
+        type: string
+        default: "ci.yml"
+        required: false
       buildspec:
         description: "Path to the buildspec file in the caller repo"
         type: string
@@ -27,7 +37,7 @@ on:
         type: string
         required: false
       timeout_minutes:
-        description: "Max minutes for the job (includes CodeBuild + GHA overhead)"
+        description: "Max minutes for the E2E job (excludes deploy time)"
         type: number
         default: 20
         required: false
@@ -42,15 +52,61 @@ on:
       JFROG_ARTIFACTORY_READ_NPM_AUTH:
         required: true
       GITHUB_PAT:
-        description: "PAT with cross-repo access to ts-cloudformation-service"
+        description: "PAT with cross-repo access and contents:write for deploy push"
         required: true
 
 permissions:
   id-token: write
-  contents: read
+  contents: write
 
 jobs:
+  deploy:
+    if: ${{ inputs.deploy_before_e2e }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_PAT }}
+
+      - name: Push to environment branch
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          git push origin HEAD:refs/heads/$TARGET_ENV --force
+          echo "Pushed $(git rev-parse HEAD) to $TARGET_ENV"
+
+      - name: Wait for deploy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_PAT }}
+          TARGET_ENV: ${{ inputs.environment }}
+          CI_WORKFLOW: ${{ inputs.ci_workflow }}
+        run: |
+          COMMIT_SHA=$(git rev-parse HEAD)
+          echo "Waiting for $CI_WORKFLOW on $TARGET_ENV branch (commit $COMMIT_SHA)..."
+
+          for i in $(seq 1 20); do
+            sleep 15
+            RUN_ID=$(gh run list --branch "$TARGET_ENV" --workflow "$CI_WORKFLOW" --limit 5 --json databaseId,headSha,status \
+              | jq -r --arg sha "$COMMIT_SHA" '.[] | select(.headSha == $sha) | .databaseId' | head -1)
+            if [[ -n "$RUN_ID" ]]; then
+              echo "Found CI run: $RUN_ID"
+              break
+            fi
+          done
+
+          if [[ -z "$RUN_ID" ]]; then
+            echo "::error::CI workflow run not found after 5 minutes"
+            exit 1
+          fi
+
+          gh run watch "$RUN_ID" --exit-status
+          echo "Deploy completed successfully"
+
   e2e:
+    needs: deploy
+    if: ${{ always() && (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
 
