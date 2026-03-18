@@ -24,9 +24,9 @@ on:
         default: "buildspec.e2e.yml"
         required: false
       env_vars_json:
-        description: "JSON array of {name, value} objects to pass as CodeBuild environment variables"
+        description: 'JSON object of env vars to pass to CodeBuild (e.g. {"KEY": "value"})'
         type: string
-        default: "[]"
+        default: "{}"
         required: false
       image_override:
         description: "Override the CodeBuild base image (e.g. mcr.microsoft.com/playwright:v1.52.0-noble)"
@@ -180,13 +180,16 @@ jobs:
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
           COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
         run: |
+          # Convert flat {"KEY":"value"} to CodeBuild format [{"name":"KEY","value":"value"}]
+          CALLER_VARS=$(echo "$CALLER_ENV_VARS" | jq '[to_entries[] | {name: .key, value: .value}]')
+
           BUILTIN_VARS=$(jq -nc '[
             {"name":"E2E_BASE_URL","value":env.BASE_URL},
             {"name":"SSM_ENV","value":env.SSM_ENV},
             {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
-          ENV_VARS=$(echo "$BUILTIN_VARS" | jq --argjson caller "$CALLER_ENV_VARS" '. + $caller')
+          ENV_VARS=$(echo "$BUILTIN_VARS" | jq --argjson caller "$CALLER_VARS" '. + $caller')
 
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
