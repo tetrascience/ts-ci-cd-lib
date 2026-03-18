@@ -14,10 +14,9 @@ on:
         default: true
         required: false
       deploy_paths:
-        description: "Space-separated glob patterns — deploy only if changed files match (empty = always deploy)"
+        description: "Space-separated glob patterns — deploy only if changed files match (e.g. 'src/** package.json')"
         type: string
-        default: ""
-        required: false
+        required: true
       ci_workflow:
         description: "Name of the CI workflow file to wait for (e.g. ci.yml)"
         type: string
@@ -72,7 +71,7 @@ permissions:
 
 jobs:
   check-changes:
-    if: ${{ inputs.deploy_before_e2e && inputs.deploy_paths != '' }}
+    if: ${{ inputs.deploy_before_e2e }}
     runs-on: ubuntu-latest
     outputs:
       should_deploy: ${{ steps.check.outputs.should_deploy }}
@@ -120,9 +119,7 @@ jobs:
 
   deploy:
     needs: check-changes
-    if: |
-      inputs.deploy_before_e2e &&
-      (inputs.deploy_paths == '' || needs.check-changes.outputs.should_deploy == 'true')
+    if: ${{ inputs.deploy_before_e2e && needs.check-changes.outputs.should_deploy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
