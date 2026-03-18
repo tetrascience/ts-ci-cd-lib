@@ -27,9 +27,9 @@ on:
         type: string
         required: false
       timeout_minutes:
-        description: "Max minutes to wait for CodeBuild to finish"
+        description: "Max minutes for the job (includes CodeBuild + GHA overhead)"
         type: number
-        default: 15
+        default: 20
         required: false
       infra_config_ref:
         description: "Git ref for ts-cloudformation-service environment config (defaults to development)"
@@ -52,7 +52,7 @@ permissions:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) + 5 }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -157,9 +157,6 @@ jobs:
           fi
           if [[ -n "$COMPUTE_TYPE_OVERRIDE" ]]; then
             CMD+=(--compute-type-override "$COMPUTE_TYPE_OVERRIDE")
-          fi
-          if [[ "$TIMEOUT_MINUTES" != "15" ]]; then
-            CMD+=(--timeout-in-minutes-override "$TIMEOUT_MINUTES")
           fi
 
           startBuild=$("${CMD[@]}")
