@@ -20,4 +20,4 @@ phases:
       - yarn install --immutable
   build:
     commands:
-      - ${E2E_TEST_COMMAND:-yarn test:e2e}
+      - yarn test:e2e
