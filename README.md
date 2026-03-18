@@ -5,10 +5,133 @@ Reusable CI/CD workflows for TetraScience repositories.
 ## Table of Contents <!-- omit in toc -->
 
 - [Workflows](#workflows)
+  - [e2e-codebuild](#e2e-codebuild)
   - [publish-npm-package](#publish-npm-package)
   - [check-links](#check-links)
 
 ## Workflows
+
+### e2e-codebuild
+
+Reusable workflow for running E2E tests via the shared `tdp-e2e` CodeBuild project. Handles deployment, environment resolution, S3 source upload, CodeBuild orchestration, and result polling.
+
+#### Minimal usage
+
+```yaml
+name: E2E Tests
+
+on:
+  pull_request:
+  push:
+    branches: [development]
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  e2e:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/e2e-codebuild.yml@main
+    with:
+      environment: predev5
+    secrets:
+      JFROG_ARTIFACTORY_NPM_VIRTUAL_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
+      JFROG_ARTIFACTORY_READ_NPM_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+      GITHUB_PAT: ${{ secrets.ARTIFACT_BUILD_GITHUB_TS_DEVOPS_PAT }}
+```
+
+This will:
+1. Push the current commit to the `predev5` branch (triggering the CI/CD deploy)
+2. Wait for the deploy to complete
+3. Run `yarn test:e2e` in CodeBuild against the freshly deployed service
+
+#### With custom env vars and test command
+
+```yaml
+jobs:
+  e2e:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/e2e-codebuild.yml@main
+    with:
+      environment: predev5
+      test_command: yarn test:e2e --runInBand
+      env_vars_json: |
+        {
+          "E2E_ORG_SLUG": "tetrascience",
+          "E2E_DATA_APP_SLUG": "threads"
+        }
+    secrets:
+      JFROG_ARTIFACTORY_NPM_VIRTUAL_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
+      JFROG_ARTIFACTORY_READ_NPM_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+      GITHUB_PAT: ${{ secrets.ARTIFACT_BUILD_GITHUB_TS_DEVOPS_PAT }}
+```
+
+#### Playwright / browser tests
+
+```yaml
+jobs:
+  e2e:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/e2e-codebuild.yml@main
+    with:
+      environment: predev5
+      image_override: mcr.microsoft.com/playwright:v1.52.0-noble
+      compute_type_override: BUILD_GENERAL1_MEDIUM
+      buildspec: buildspec.e2e.yml  # use your own buildspec
+    secrets:
+      JFROG_ARTIFACTORY_NPM_VIRTUAL_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
+      JFROG_ARTIFACTORY_READ_NPM_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+      GITHUB_PAT: ${{ secrets.ARTIFACT_BUILD_GITHUB_TS_DEVOPS_PAT }}
+```
+
+#### Inputs
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `environment` | Target environment (e.g. predev5, dev) | No | `predev5` |
+| `deploy_before_e2e` | Push to env branch and wait for CI deploy before testing | No | `true` |
+| `ci_workflow` | CI workflow filename to wait for during deploy | No | `ci.yml` |
+| `test_command` | Test command for the default buildspec | No | `yarn test:e2e` |
+| `buildspec` | Path to a custom buildspec in the caller repo (empty = use shared default) | No | `""` |
+| `env_vars_json` | JSON object of env vars to pass to CodeBuild | No | `{}` |
+| `image_override` | Override CodeBuild base image | No | |
+| `compute_type_override` | Override CodeBuild compute type (e.g. `BUILD_GENERAL1_MEDIUM`) | No | |
+| `timeout_minutes` | Max minutes for the E2E job | No | `20` |
+
+#### Secrets
+
+| Secret | Description | Required |
+|--------|-------------|----------|
+| `JFROG_ARTIFACTORY_NPM_VIRTUAL_URL` | JFrog npm registry URL | Yes |
+| `JFROG_ARTIFACTORY_READ_NPM_AUTH` | JFrog npm registry credentials | Yes |
+| `GITHUB_PAT` | PAT with cross-repo read + contents:write for deploy push | Yes |
+
+#### How it works
+
+The workflow has two jobs:
+
+**deploy** (optional, controlled by `deploy_before_e2e`):
+1. Force-pushes the current commit to the target environment branch (e.g. `predev5`)
+2. Waits for the repo's CI workflow to build, push, and deploy the service
+
+**e2e** (runs after deploy succeeds or is skipped):
+1. Checks out the caller repo and the environment config from `ts-cloudformation-service`
+2. Resolves the target environment (account, region, base URL, SSM prefix)
+3. Assumes the `gha-tdp-e2e-{env}` OIDC role in the target AWS account
+4. Zips the source and uploads to the `tdp-e2e-source-{account}` S3 bucket
+5. Starts a CodeBuild build with the buildspec, env vars, and optional image/compute overrides
+6. Polls until CodeBuild completes and reports the result
+
+#### Default buildspec
+
+When no custom `buildspec` is provided, the workflow uses [`buildspecs/e2e-default.yml`](buildspecs/e2e-default.yml) which:
+- Reads the E2E auth token from SSM (`/tetrascience/{ssm_env}/e2e/E2E_TS_AUTH_TOKEN`)
+- Sets up Node 20, corepack, and Yarn 4
+- Configures the JFrog npm registry via `yarn config set`
+- Runs `yarn install --immutable`
+- Executes the test command (`E2E_TEST_COMMAND` env var, defaults to `yarn test:e2e`)
+
+#### Infrastructure prerequisites
+
+The shared CodeBuild project must be deployed to each target environment. See [`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml) and the [data-apps README](https://github.com/tetrascience/ts-service-data-apps#adding-a-new-environment) for setup instructions.
 
 ### publish-npm-package
 
