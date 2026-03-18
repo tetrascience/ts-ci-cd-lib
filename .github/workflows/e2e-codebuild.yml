@@ -214,7 +214,7 @@ jobs:
           if [[ -n "$CUSTOM_BUILDSPEC" ]]; then
             BUILDSPEC="$CUSTOM_BUILDSPEC"
           else
-            BUILDSPEC=$(cat <<SPEC
+            BUILDSPEC=$(cat <<'SPEC'
           version: 0.2
           phases:
             install:
@@ -222,23 +222,24 @@ jobs:
                 nodejs: 20
               commands:
                 - |
-                  SSM_PATH="/tetrascience/\${SSM_ENV:-development}/e2e/E2E_TS_AUTH_TOKEN"
-                  export E2E_TS_AUTH_TOKEN=\$(aws ssm get-parameter --name "\$SSM_PATH" --with-decryption --query 'Parameter.Value' --output text)
+                  SSM_PATH="/tetrascience/${SSM_ENV:-development}/e2e/E2E_TS_AUTH_TOKEN"
+                  export E2E_TS_AUTH_TOKEN=$(aws ssm get-parameter --name "$SSM_PATH" --with-decryption --query 'Parameter.Value' --output text)
                 - npm install -g corepack
                 - corepack enable
                 - corepack prepare yarn@4.0.2 --activate
                 - |
-                  if [ -n "\$JFROG_ARTIFACTORY_URL" ]; then
-                    echo "npmRegistryServer: \${JFROG_ARTIFACTORY_URL}" >> .yarnrc.yml
-                    echo "npmAuthIdent: \${JFROG_ARTIFACTORY_AUTH}" >> .yarnrc.yml
-                    echo "npmAlwaysAuth: true" >> .yarnrc.yml
+                  if [ -n "$JFROG_ARTIFACTORY_URL" ]; then
+                    yarn config set npmRegistryServer "$JFROG_ARTIFACTORY_URL"
+                    yarn config set npmAuthIdent "$JFROG_ARTIFACTORY_AUTH"
+                    yarn config set npmAlwaysAuth true
                   fi
                 - yarn install --immutable
             build:
               commands:
-                - $TEST_COMMAND
+                - PLACEHOLDER_TEST_COMMAND
           SPEC
           )
+            BUILDSPEC="${BUILDSPEC//PLACEHOLDER_TEST_COMMAND/$TEST_COMMAND}"
           fi
 
           CMD=(aws codebuild start-build
