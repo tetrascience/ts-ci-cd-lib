@@ -250,6 +250,7 @@ jobs:
           echo "Started CodeBuild (tdp-e2e): $buildId"
 
       - name: Wait for CodeBuild
+        id: wait
         env:
           BUILD_ID: ${{ steps.codebuild.outputs.build_id }}
           TIMEOUT: ${{ inputs.timeout_minutes }}
@@ -269,15 +270,72 @@ jobs:
               break
             fi
           done
-          echo "Build logs: $(echo "$buildInfo" | jq -r '.builds[0].logs.deepLink')"
+
+          # Extract log info
+          LOG_GROUP=$(echo "$buildInfo" | jq -r '.builds[0].logs.groupName')
+          LOG_STREAM=$(echo "$buildInfo" | jq -r '.builds[0].logs.streamName')
+          LOG_LINK=$(echo "$buildInfo" | jq -r '.builds[0].logs.deepLink')
+
+          echo "log_group=$LOG_GROUP" >> "$GITHUB_OUTPUT"
+          echo "log_stream=$LOG_STREAM" >> "$GITHUB_OUTPUT"
+          echo "log_link=$LOG_LINK" >> "$GITHUB_OUTPUT"
+          echo "build_status=$buildStatus" >> "$GITHUB_OUTPUT"
+
           if [[ $SECONDS -gt $MAX_SECONDS ]]; then
             echo "::error::Timeout exceeded ($TIMEOUT min)"
-            exit 1
           fi
-          if [[ "$buildStatus" == "SUCCEEDED" ]]; then
+
+      - name: Fetch CodeBuild logs
+        if: always() && steps.wait.outputs.log_stream != ''
+        env:
+          LOG_GROUP: ${{ steps.wait.outputs.log_group }}
+          LOG_STREAM: ${{ steps.wait.outputs.log_stream }}
+        run: |
+          set -euo pipefail
+          echo "::group::CodeBuild output"
+          aws logs get-log-events \
+            --log-group-name "$LOG_GROUP" \
+            --log-stream-name "$LOG_STREAM" \
+            --start-from-head \
+            --query 'events[].message' \
+            --output text 2>/dev/null || echo "(failed to fetch logs)"
+          echo "::endgroup::"
+
+      - name: Write job summary
+        if: always() && steps.wait.outputs.build_status != ''
+        env:
+          BUILD_STATUS: ${{ steps.wait.outputs.build_status }}
+          LOG_LINK: ${{ steps.wait.outputs.log_link }}
+          BUILD_ID: ${{ steps.codebuild.outputs.build_id }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          if [[ "$BUILD_STATUS" == "SUCCEEDED" ]]; then
+            ICON="white_check_mark"
+          else
+            ICON="x"
+          fi
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## :${ICON}: E2E Tests — ${BUILD_STATUS}
+
+          | | |
+          |---|---|
+          | **Environment** | \`${ENVIRONMENT}\` |
+          | **Build ID** | \`${BUILD_ID}\` |
+          | **Status** | ${BUILD_STATUS} |
+          | **CloudWatch Logs** | [View logs](${LOG_LINK}) |
+          EOF
+
+      - name: Check result
+        if: always()
+        env:
+          BUILD_STATUS: ${{ steps.wait.outputs.build_status }}
+          LOG_LINK: ${{ steps.wait.outputs.log_link }}
+        run: |
+          if [[ "$BUILD_STATUS" == "SUCCEEDED" ]]; then
             echo "E2E tests passed"
           else
-            echo "::error::E2E tests failed — status: $buildStatus"
-            echo "::error::See CloudWatch logs: $(echo "$buildInfo" | jq -r '.builds[0].logs.deepLink')"
+            echo "::error::E2E tests failed — status: $BUILD_STATUS"
+            echo "::error::CloudWatch logs: $LOG_LINK"
             exit 1
           fi
