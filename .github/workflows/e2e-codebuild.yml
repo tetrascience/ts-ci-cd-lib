@@ -59,7 +59,7 @@ jobs:
           repository: tetrascience/ts-cloudformation-service
           ref: ${{ inputs.infra_config_ref }}
           token: ${{ secrets.GITHUB_PAT }}
-          sparse-checkout: infrastructure/tdp-backend-e2e-environments.yml
+          sparse-checkout: infrastructure/tdp-e2e-environments.yml
           sparse-checkout-cone-mode: false
           path: .infra
 
@@ -68,7 +68,7 @@ jobs:
         env:
           TARGET_ENV: ${{ inputs.environment }}
         run: |
-          CONFIG=".infra/infrastructure/tdp-backend-e2e-environments.yml"
+          CONFIG=".infra/infrastructure/tdp-e2e-environments.yml"
           ENV="$TARGET_ENV"
 
           ACCOUNT=$(yq -r ".environments.${ENV}.account" "$CONFIG")
@@ -91,7 +91,7 @@ jobs:
           echo "region=$REGION" >> "$GITHUB_OUTPUT"
           echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
           echo "ssm_env=$SSM_ENV" >> "$GITHUB_OUTPUT"
-          echo "source_bucket=tdp-backend-e2e-source-${ACCOUNT}" >> "$GITHUB_OUTPUT"
+          echo "source_bucket=tdp-e2e-source-${ACCOUNT}" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
@@ -130,7 +130,7 @@ jobs:
 
           # Build start-build command
           CMD=(aws codebuild start-build
-            --project-name tdp-backend-e2e
+            --project-name tdp-e2e
             --source-type-override S3
             --source-location-override "${{ steps.source.outputs.s3_location }}"
             --buildspec-override "${{ inputs.buildspec }}"
@@ -149,7 +149,7 @@ jobs:
           startBuild=$("${CMD[@]}")
           buildId=$(echo "$startBuild" | jq -r '.build.id')
           echo "build_id=$buildId" >> "$GITHUB_OUTPUT"
-          echo "Started CodeBuild (tdp-backend-e2e): $buildId"
+          echo "Started CodeBuild (tdp-e2e): $buildId"
 
       - name: Wait for CodeBuild
         env:
