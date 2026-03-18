@@ -19,12 +19,12 @@ on:
         default: "ci.yml"
         required: false
       test_command:
-        description: "Command to run E2E tests (used by default buildspec)"
+        description: "Command to run E2E tests (default: yarn test:e2e)"
         type: string
         default: "yarn test:e2e"
         required: false
       buildspec:
-        description: "Path to a custom buildspec file (overrides the default inline buildspec)"
+        description: "Path to a custom buildspec file in the caller repo (leave empty to use the shared default)"
         type: string
         default: ""
         required: false
@@ -131,6 +131,21 @@ jobs:
           sparse-checkout-cone-mode: false
           path: .infra
 
+      - name: Checkout default buildspec
+        if: ${{ inputs.buildspec == '' }}
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: tetrascience/ts-ci-cd-lib
+          ref: SW-1336-e2e-reusable-workflow  # TODO: change to main after merge
+          token: ${{ secrets.GITHUB_PAT }}
+          sparse-checkout: buildspecs/e2e-default.yml
+          sparse-checkout-cone-mode: false
+          path: .ci-cd-lib
+
+      - name: Copy default buildspec into source
+        if: ${{ inputs.buildspec == '' }}
+        run: cp .ci-cd-lib/buildspecs/e2e-default.yml buildspec.e2e.yml
+
       - name: Resolve environment
         id: env
         env:
@@ -179,7 +194,7 @@ jobs:
         run: |
           set -euo pipefail
           S3_KEY="${REPO_NAME}/${COMMIT_SHA}.zip"
-          zip -r -q /tmp/source.zip . -x '.infra/*' '.git/*'
+          zip -r -q /tmp/source.zip . -x '.infra/*' '.ci-cd-lib/*' '.git/*'
           aws s3 cp /tmp/source.zip "s3://${SOURCE_BUCKET}/${S3_KEY}"
           echo "s3_location=${SOURCE_BUCKET}/${S3_KEY}" >> "$GITHUB_OUTPUT"
 
@@ -192,7 +207,7 @@ jobs:
           JFROG_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
           CALLER_ENV_VARS: ${{ inputs.env_vars_json }}
           S3_LOCATION: ${{ steps.source.outputs.s3_location }}
-          CUSTOM_BUILDSPEC: ${{ inputs.buildspec }}
+          BUILDSPEC_PATH: ${{ inputs.buildspec || 'buildspec.e2e.yml' }}
           TEST_COMMAND: ${{ inputs.test_command }}
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
           COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
@@ -205,48 +220,17 @@ jobs:
           BUILTIN_VARS=$(jq -nc '[
             {"name":"E2E_BASE_URL","value":env.BASE_URL},
             {"name":"SSM_ENV","value":env.SSM_ENV},
+            {"name":"E2E_TEST_COMMAND","value":env.TEST_COMMAND},
             {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
           ENV_VARS=$(echo "$BUILTIN_VARS" | jq --argjson caller "$CALLER_VARS" '. + $caller')
 
-          # Use custom buildspec if provided, otherwise generate default inline
-          if [[ -n "$CUSTOM_BUILDSPEC" ]]; then
-            BUILDSPEC="$CUSTOM_BUILDSPEC"
-          else
-            BUILDSPEC=$(cat <<'SPEC'
-          version: 0.2
-          phases:
-            install:
-              runtime-versions:
-                nodejs: 20
-              commands:
-                - |
-                  SSM_PATH="/tetrascience/${SSM_ENV:-development}/e2e/E2E_TS_AUTH_TOKEN"
-                  export E2E_TS_AUTH_TOKEN=$(aws ssm get-parameter --name "$SSM_PATH" --with-decryption --query 'Parameter.Value' --output text)
-                - npm install -g corepack
-                - corepack enable
-                - corepack prepare yarn@4.0.2 --activate
-                - |
-                  if [ -n "$JFROG_ARTIFACTORY_URL" ]; then
-                    yarn config set npmRegistryServer "$JFROG_ARTIFACTORY_URL"
-                    yarn config set npmAuthIdent "$JFROG_ARTIFACTORY_AUTH"
-                    yarn config set npmAlwaysAuth true
-                  fi
-                - yarn install --immutable
-            build:
-              commands:
-                - PLACEHOLDER_TEST_COMMAND
-          SPEC
-          )
-            BUILDSPEC="${BUILDSPEC//PLACEHOLDER_TEST_COMMAND/$TEST_COMMAND}"
-          fi
-
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
             --source-type-override S3
             --source-location-override "$S3_LOCATION"
-            --buildspec-override "$BUILDSPEC"
+            --buildspec-override "$BUILDSPEC_PATH"
             --environment-variables-override "$ENV_VARS")
 
           if [[ -n "$IMAGE_OVERRIDE" ]]; then
