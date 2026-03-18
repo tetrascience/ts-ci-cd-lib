@@ -16,11 +16,6 @@ on:
         type: string
         default: "ci.yml"
         required: false
-      test_command:
-        description: "Command to run E2E tests (default: yarn test:e2e)"
-        type: string
-        default: "yarn test:e2e"
-        required: false
       buildspec:
         description: "Path to a custom buildspec file in the caller repo (leave empty to use the shared default)"
         type: string
@@ -255,7 +250,6 @@ jobs:
           CALLER_ENV_VARS: ${{ inputs.env_vars_json }}
           S3_LOCATION: ${{ steps.source.outputs.s3_location }}
           BUILDSPEC_PATH: ${{ inputs.buildspec || 'buildspec.e2e.yml' }}
-          TEST_COMMAND: ${{ inputs.test_command }}
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
           COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
         run: |
@@ -266,7 +260,6 @@ jobs:
           BUILTIN_VARS=$(jq -nc '[
             {"name":"E2E_BASE_URL","value":env.BASE_URL},
             {"name":"SSM_ENV","value":env.SSM_ENV},
-            {"name":"E2E_TEST_COMMAND","value":env.TEST_COMMAND},
             {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
