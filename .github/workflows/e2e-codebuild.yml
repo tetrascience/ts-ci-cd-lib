@@ -11,8 +11,8 @@ on:
         description: "Space-separated glob patterns — deploy only if changed files match. Empty string = never deploy."
         type: string
         required: true
-      ci_workflow:
-        description: "Name of the CI workflow file to wait for (e.g. ci.yml)"
+      deploy_workflow:
+        description: "Workflow file that builds and deploys the service (waited on after pushing to env branch)"
         type: string
         default: "ci.yml"
         required: false
@@ -127,24 +127,24 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_PAT }}
           TARGET_ENV: ${{ inputs.environment }}
-          CI_WORKFLOW: ${{ inputs.ci_workflow }}
+          DEPLOY_WORKFLOW: ${{ inputs.deploy_workflow }}
         run: |
           set -euo pipefail
           COMMIT_SHA=$(git rev-parse HEAD)
-          echo "Waiting for $CI_WORKFLOW on $TARGET_ENV branch (commit $COMMIT_SHA)..."
+          echo "Waiting for $DEPLOY_WORKFLOW on $TARGET_ENV branch (commit $COMMIT_SHA)..."
 
           for i in $(seq 1 20); do
             sleep 15
-            RUN_ID=$(gh run list --branch "$TARGET_ENV" --workflow "$CI_WORKFLOW" --limit 20 --json databaseId,headSha,status \
+            RUN_ID=$(gh run list --branch "$TARGET_ENV" --workflow "$DEPLOY_WORKFLOW" --limit 20 --json databaseId,headSha,status \
               | jq -r --arg sha "$COMMIT_SHA" '.[] | select(.headSha == $sha) | .databaseId' | head -1)
             if [[ -n "$RUN_ID" ]]; then
-              echo "Found CI run: $RUN_ID"
+              echo "Found deploy run: $RUN_ID"
               break
             fi
           done
 
           if [[ -z "$RUN_ID" ]]; then
-            echo "::error::CI workflow run not found after 5 minutes"
+            echo "::error::Deploy workflow run not found after 5 minutes"
             exit 1
           fi
 
