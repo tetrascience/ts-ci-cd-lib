@@ -13,7 +13,7 @@ Reusable CI/CD workflows for TetraScience repositories.
 
 ### e2e-codebuild
 
-Reusable workflow for running E2E tests via the shared `tdp-e2e` CodeBuild project. Handles deployment, environment resolution, S3 source upload, CodeBuild orchestration, and result polling.
+Reusable workflow for running E2E tests via the shared `tdp-e2e` CodeBuild project. Handles deployment, environment resolution, S3 source upload, CodeBuild orchestration, and result polling. CodeBuild logs are streamed into the GHA step output and a job summary is written to the PR checks view.
 
 #### Minimal usage
 
@@ -27,7 +27,7 @@ on:
 
 permissions:
   id-token: write
-  contents: write
+  contents: read
 
 jobs:
   e2e:
@@ -44,6 +44,7 @@ This will:
 1. Push the current commit to the `predev5` branch (triggering the CI/CD deploy)
 2. Wait for the deploy to complete
 3. Run `yarn test:e2e` in CodeBuild against the freshly deployed service
+4. Stream the full test output into the GHA step log
 
 #### With custom env vars and test command
 
@@ -82,6 +83,21 @@ jobs:
       GITHUB_PAT: ${{ secrets.ARTIFACT_BUILD_GITHUB_TS_DEVOPS_PAT }}
 ```
 
+#### Skip deploy (test against current deployment)
+
+```yaml
+jobs:
+  e2e:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/e2e-codebuild.yml@main
+    with:
+      environment: predev5
+      deploy_before_e2e: false
+    secrets:
+      JFROG_ARTIFACTORY_NPM_VIRTUAL_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
+      JFROG_ARTIFACTORY_READ_NPM_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+      GITHUB_PAT: ${{ secrets.ARTIFACT_BUILD_GITHUB_TS_DEVOPS_PAT }}
+```
+
 #### Inputs
 
 | Input | Description | Required | Default |
@@ -102,14 +118,14 @@ jobs:
 |--------|-------------|----------|
 | `JFROG_ARTIFACTORY_NPM_VIRTUAL_URL` | JFrog npm registry URL | Yes |
 | `JFROG_ARTIFACTORY_READ_NPM_AUTH` | JFrog npm registry credentials | Yes |
-| `GITHUB_PAT` | PAT with cross-repo read + contents:write for deploy push | Yes |
+| `GITHUB_PAT` | PAT with cross-repo read access + repo write (for deploy push to env branch) | Yes |
 
 #### How it works
 
 The workflow has two jobs:
 
 **deploy** (optional, controlled by `deploy_before_e2e`):
-1. Force-pushes the current commit to the target environment branch (e.g. `predev5`)
+1. Force-pushes the current commit to the target environment branch (e.g. `predev5`) using `GITHUB_PAT`
 2. Waits for the repo's CI workflow to build, push, and deploy the service
 
 **e2e** (runs after deploy succeeds or is skipped):
@@ -118,7 +134,9 @@ The workflow has two jobs:
 3. Assumes the `gha-tdp-e2e-{env}` OIDC role in the target AWS account
 4. Zips the source and uploads to the `tdp-e2e-source-{account}` S3 bucket
 5. Starts a CodeBuild build with the buildspec, env vars, and optional image/compute overrides
-6. Polls until CodeBuild completes and reports the result
+6. Polls until CodeBuild completes
+7. Fetches the full CloudWatch log stream and prints it in the GHA step output
+8. Writes a job summary with status, environment, and log link
 
 #### Default buildspec
 
