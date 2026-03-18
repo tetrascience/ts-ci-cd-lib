@@ -13,6 +13,11 @@ on:
         type: boolean
         default: true
         required: false
+      deploy_paths:
+        description: "Space-separated glob patterns — deploy only if changed files match (empty = always deploy)"
+        type: string
+        default: ""
+        required: false
       ci_workflow:
         description: "Name of the CI workflow file to wait for (e.g. ci.yml)"
         type: string
@@ -66,8 +71,58 @@ permissions:
   contents: read
 
 jobs:
+  check-changes:
+    if: ${{ inputs.deploy_before_e2e && inputs.deploy_paths != '' }}
+    runs-on: ubuntu-latest
+    outputs:
+      should_deploy: ${{ steps.check.outputs.should_deploy }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if service code changed
+        id: check
+        env:
+          DEPLOY_PATHS: ${{ inputs.deploy_paths }}
+        run: |
+          set -euo pipefail
+          # Get the merge base to compare against
+          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+            BASE="origin/$GITHUB_BASE_REF"
+          else
+            BASE="HEAD~1"
+          fi
+
+          CHANGED_FILES=$(git diff --name-only "$BASE" HEAD 2>/dev/null || echo "")
+          if [[ -z "$CHANGED_FILES" ]]; then
+            echo "No changed files detected, will deploy"
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          # Check if any changed file matches the deploy paths
+          for pattern in $DEPLOY_PATHS; do
+            while IFS= read -r file; do
+              if [[ -n "$file" ]] && [[ "$file" == $pattern ]]; then
+                echo "Match: $file matches $pattern"
+                echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            done <<< "$CHANGED_FILES"
+          done
+
+          echo "No service code changes — skipping deploy"
+          echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+
   deploy:
-    if: ${{ inputs.deploy_before_e2e }}
+    needs: check-changes
+    if: |
+      inputs.deploy_before_e2e &&
+      (inputs.deploy_paths == '' || needs.check-changes.outputs.should_deploy == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -113,8 +168,11 @@ jobs:
           echo "Deploy completed successfully"
 
   e2e:
-    needs: deploy
-    if: ${{ always() && (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') }}
+    needs: [check-changes, deploy]
+    if: |
+      always() &&
+      (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
+      (needs.check-changes.result == 'success' || needs.check-changes.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
 
@@ -271,7 +329,6 @@ jobs:
             fi
           done
 
-          # Extract log info
           LOG_GROUP=$(echo "$buildInfo" | jq -r '.builds[0].logs.groupName')
           LOG_STREAM=$(echo "$buildInfo" | jq -r '.builds[0].logs.streamName')
           LOG_LINK=$(echo "$buildInfo" | jq -r '.builds[0].logs.deepLink')
