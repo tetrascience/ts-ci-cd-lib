@@ -18,10 +18,15 @@ on:
         type: string
         default: "ci.yml"
         required: false
-      buildspec:
-        description: "Path to the buildspec file in the caller repo"
+      test_command:
+        description: "Command to run E2E tests (used by default buildspec)"
         type: string
-        default: "buildspec.e2e.yml"
+        default: "yarn test:e2e"
+        required: false
+      buildspec:
+        description: "Path to a custom buildspec file (overrides the default inline buildspec)"
+        type: string
+        default: ""
         required: false
       env_vars_json:
         description: 'JSON object of env vars to pass to CodeBuild (e.g. {"KEY": "value"})'
@@ -41,6 +46,7 @@ on:
         type: number
         default: 20
         required: false
+      # TODO: remove after ts-cloudformation-service#3706 is merged to development
       infra_config_ref:
         description: "Git ref for ts-cloudformation-service env config checkout (leave empty for default branch)"
         type: string
@@ -186,7 +192,8 @@ jobs:
           JFROG_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
           CALLER_ENV_VARS: ${{ inputs.env_vars_json }}
           S3_LOCATION: ${{ steps.source.outputs.s3_location }}
-          BUILDSPEC: ${{ inputs.buildspec }}
+          CUSTOM_BUILDSPEC: ${{ inputs.buildspec }}
+          TEST_COMMAND: ${{ inputs.test_command }}
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
           COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
         run: |
@@ -202,6 +209,37 @@ jobs:
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
           ENV_VARS=$(echo "$BUILTIN_VARS" | jq --argjson caller "$CALLER_VARS" '. + $caller')
+
+          # Use custom buildspec if provided, otherwise generate default inline
+          if [[ -n "$CUSTOM_BUILDSPEC" ]]; then
+            BUILDSPEC="$CUSTOM_BUILDSPEC"
+          else
+            BUILDSPEC=$(cat <<SPEC
+          version: 0.2
+          phases:
+            install:
+              runtime-versions:
+                nodejs: 20
+              commands:
+                - |
+                  SSM_PATH="/tetrascience/\${SSM_ENV:-development}/e2e/E2E_TS_AUTH_TOKEN"
+                  export E2E_TS_AUTH_TOKEN=\$(aws ssm get-parameter --name "\$SSM_PATH" --with-decryption --query 'Parameter.Value' --output text)
+                - npm install -g corepack
+                - corepack enable
+                - corepack prepare yarn@4.0.2 --activate
+                - |
+                  if [ -n "\$JFROG_ARTIFACTORY_URL" ]; then
+                    echo "npmRegistryServer: \${JFROG_ARTIFACTORY_URL}" >> .yarnrc.yml
+                    echo "npmAuthIdent: \${JFROG_ARTIFACTORY_AUTH}" >> .yarnrc.yml
+                    echo "npmAlwaysAuth: true" >> .yarnrc.yml
+                  fi
+                - yarn install --immutable
+            build:
+              commands:
+                - $TEST_COMMAND
+          SPEC
+          )
+          fi
 
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
