@@ -156,7 +156,30 @@ Callers who need a different test command or setup should provide their own buil
 
 #### Infrastructure prerequisites
 
-The shared CodeBuild project must be deployed to each target environment. See [`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml) and the [data-apps README](https://github.com/tetrascience/ts-service-data-apps#adding-a-new-environment) for setup instructions.
+The shared CodeBuild project and supporting resources are defined in [`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml). Environment config lives in [`tdp-e2e-environments.yml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e-environments.yml). All currently supported environments are already deployed.
+
+To add a new environment:
+
+1. Add an entry to `infrastructure/tdp-e2e-environments.yml` in ts-cloudformation-service
+2. Deploy the `tdp-e2e` stack to the target account:
+   ```sh
+   aws cloudformation deploy \
+     --template-file infrastructure/tdp-e2e.yaml \
+     --stack-name tdp-e2e \
+     --parameter-overrides EnvironmentName=<env-name> \
+     --capabilities CAPABILITY_NAMED_IAM \
+     --tags tetrascience_product=tdp tdp_layer=testing \
+     --profile <env-profile> --region <region>
+   ```
+3. Create a service user in the TDP platform for that environment and store its auth token in SSM:
+   ```sh
+   aws ssm put-parameter \
+     --name "/tetrascience/development/e2e/E2E_TS_AUTH_TOKEN" \
+     --type SecureString \
+     --value "<service-user-token>" \
+     --profile <env-profile> --region <region>
+   ```
+   The token must be scoped to a single org (e.g. `tetrascience`) with `orgAdmin` + `tenantAdmin` roles.
 
 ### publish-npm-package
 
