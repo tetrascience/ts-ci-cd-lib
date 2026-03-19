@@ -11,15 +11,14 @@ on:
         description: "Space-separated glob patterns — deploy only if changed files match. Empty string = never deploy."
         type: string
         required: true
+      buildspec:
+        description: "Path to the buildspec file in the caller repo"
+        type: string
+        required: true
       deploy_workflow:
         description: "Workflow file that builds and deploys the service (waited on after pushing to env branch)"
         type: string
         default: "ci.yml"
-        required: false
-      buildspec:
-        description: "Path to a custom buildspec file in the caller repo (leave empty to use the shared default)"
-        type: string
-        default: ""
         required: false
       env_vars_json:
         description: 'JSON object of env vars to pass to CodeBuild (e.g. {"KEY": "value"})'
@@ -173,21 +172,6 @@ jobs:
           sparse-checkout-cone-mode: false
           path: .infra
 
-      - name: Checkout default buildspec
-        if: ${{ inputs.buildspec == '' }}
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          repository: tetrascience/ts-ci-cd-lib
-          ref: SW-1336-e2e-reusable-workflow  # TODO: change to main after merge
-          token: ${{ secrets.GITHUB_PAT }}
-          sparse-checkout: buildspecs/e2e-default.yml
-          sparse-checkout-cone-mode: false
-          path: .ci-cd-lib
-
-      - name: Copy default buildspec into source
-        if: ${{ inputs.buildspec == '' }}
-        run: cp .ci-cd-lib/buildspecs/e2e-default.yml buildspec.e2e.yml
-
       - name: Resolve environment
         id: env
         env:
@@ -234,7 +218,7 @@ jobs:
         run: |
           set -euo pipefail
           S3_KEY="${REPO_NAME}/${COMMIT_SHA}.zip"
-          zip -r -q /tmp/source.zip . -x '.infra/*' '.ci-cd-lib/*' '.git/*'
+          zip -r -q /tmp/source.zip . -x '.infra/*' '.git/*'
           aws s3 cp /tmp/source.zip "s3://${SOURCE_BUCKET}/${S3_KEY}"
           echo "s3_location=${SOURCE_BUCKET}/${S3_KEY}" >> "$GITHUB_OUTPUT"
 
@@ -247,7 +231,7 @@ jobs:
           JFROG_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
           CALLER_ENV_VARS: ${{ inputs.env_vars_json }}
           S3_LOCATION: ${{ steps.source.outputs.s3_location }}
-          BUILDSPEC_PATH: ${{ inputs.buildspec || 'buildspec.e2e.yml' }}
+          BUILDSPEC_PATH: ${{ inputs.buildspec }}
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
           COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
         run: |
