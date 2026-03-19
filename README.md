@@ -13,11 +13,18 @@ Reusable CI/CD workflows for TetraScience repositories.
 
 ### publish-npm-package
 
-Publishes npm packages to JFrog Artifactory or the public npm registry.
+Reusable workflow for publishing npm packages to JFrog Artifactory or the public npm registry.
 
 #### Usage
 
 ```yaml
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
 jobs:
   publish:
     uses: tetrascience/ts-ci-cd-lib/.github/workflows/publish-npm-package.yml@main
@@ -29,23 +36,87 @@ jobs:
       PUBLISH_REGISTRY: ${{ secrets.JFROG_NPM_PUBLISH_REGISTRY }}
 ```
 
-Supports `working_directory` for subdirectory packages, `prerelease_tag` for pre-releases, and `publish_to_public_npm` for public registry.
+#### Inputs
 
----
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `node_version` | Node.js version | No | `"20"` |
+| `working_directory` | Directory containing the package to publish | No | `"."` |
+| `prerelease_tag` | Prerelease tag for version suffix and npm dist-tag (e.g., alpha, beta). Leave empty for non-prerelease versions. | No | `""` |
+| `run_tests` | Whether to run tests before publishing | No | `true` |
+| `publish_to_public_npm` | Set to true to confirm publishing to public npm registry | No | `false` |
+
+#### Secrets
+
+| Secret | Description | Required |
+|--------|-------------|----------|
+| `AUTH_TOKEN` | Authentication token for JFrog Artifactory | Yes |
+| `REGISTRY` | JFrog Artifactory npm registry URL (for installing dependencies) | Yes |
+| `PUBLISH_REGISTRY` | Registry URL for publishing the package | Yes |
+| `NPM_TOKEN` | npm token (required when publishing to public npm registry) | No |
+
+#### Publishing to Public npm Registry
+
+To publish to the public npm registry (`https://registry.npmjs.org`):
+
+1. Set `publish_to_public_npm: true` in the workflow inputs
+2. Provide the `NPM_TOKEN` secret
+3. Set `PUBLISH_REGISTRY` to `https://registry.npmjs.org`
+
+The workflow will automatically update the package scope from `@tetrascience` to `@tetrascience-npm` when publishing to the public registry.
 
 ### check-links
 
-Checks broken links in markdown files using [lychee](https://lychee.cli.rs/).
+Reusable workflow for checking broken links in markdown files using [lychee](https://lychee.cli.rs/). The calling repository provides its own `lychee.toml` configuration file in the repo root.
 
 #### Usage
 
 ```yaml
+name: Link Check
+
+on:
+  push:
+    branches: [main]
+    paths: ["**/*.md", "lychee.toml", ".lycheeignore"]
+  pull_request:
+    paths: ["**/*.md", "lychee.toml", ".lycheeignore"]
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
   check-links:
     uses: tetrascience/ts-ci-cd-lib/.github/workflows/check-links.yml@main
 ```
 
-Requires a `lychee.toml` config in the caller repo root.
+#### Inputs
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `lychee_args` | Arguments passed to lychee. The calling repo's `lychee.toml` handles most configuration. | No | `"--cache --max-cache-age 1d ."` |
+
+#### Secrets
+
+No secrets required. The workflow uses the automatically available `GITHUB_TOKEN` for authenticating with the GitHub API (to avoid rate limits when checking GitHub links).
+
+#### Calling Repo Setup
+
+Create a `lychee.toml` file in your repository root:
+
+```toml
+max_concurrency = 4
+max_retries = 3
+timeout = 20
+accept = [200, 204, 301, 429]
+exclude = [
+  "^http://localhost",
+  "^http://127\\.0\\.0\\.1",
+  "^https?://example\\.com",
+]
+```
 
 ---
 
