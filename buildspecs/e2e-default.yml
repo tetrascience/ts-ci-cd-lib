@@ -2,7 +2,7 @@ version: 0.2
 
 env:
   parameter-store:
-    E2E_TS_AUTH_TOKEN: /tetrascience/development/e2e/E2E_TS_AUTH_TOKEN
+    E2E_TS_AUTH_TOKEN: /tdp/e2e/${E2E_SERVICE_NAME}/auth-token
 
 phases:
   install:
