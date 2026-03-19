@@ -33,12 +33,6 @@ on:
         type: number
         default: 25
         required: false
-      # TODO: remove after ts-cloudformation-service#3706 is merged to development
-      infra_config_ref:
-        description: "Git ref for ts-cloudformation-service env config checkout (leave empty for default branch)"
-        type: string
-        default: ""
-        required: false
     secrets:
       JFROG_ARTIFACTORY_NPM_VIRTUAL_URL:
         required: true
@@ -161,7 +155,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: tetrascience/ts-cloudformation-service
-          ref: ${{ inputs.infra_config_ref || '' }}
+          # TODO: remove ref after ts-cloudformation-service#3706 is merged to development
+          ref: SW-1336-e2e-ci
           token: ${{ secrets.GITHUB_PAT }}
           sparse-checkout: infrastructure/tdp-e2e-environments.yml
           sparse-checkout-cone-mode: false
