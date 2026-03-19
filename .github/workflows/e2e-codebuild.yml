@@ -29,9 +29,9 @@ on:
         type: string
         required: false
       timeout_minutes:
-        description: "Max minutes for the E2E job (excludes deploy time)"
+        description: "Max minutes for the E2E job — includes buffer for setup steps"
         type: number
-        default: 20
+        default: 25
         required: false
       # TODO: remove after ts-cloudformation-service#3706 is merged to development
       infra_config_ref:
@@ -152,7 +152,7 @@ jobs:
       (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
       (needs.check-changes.result == 'success' || needs.check-changes.result == 'skipped')
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.timeout_minutes + 5 }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
