@@ -61,10 +61,13 @@ jobs:
         id: check
         env:
           DEPLOY_PATHS: ${{ inputs.deploy_paths }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
           if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
             BASE="origin/$GITHUB_BASE_REF"
+          elif [[ -n "$BEFORE_SHA" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            BASE="$BEFORE_SHA"
           else
             BASE="HEAD~1"
           fi
@@ -290,7 +293,9 @@ jobs:
           echo "build_status=$buildStatus" >> "$GITHUB_OUTPUT"
 
           if [[ $SECONDS -gt $MAX_SECONDS ]]; then
-            echo "::error::Timeout exceeded ($TIMEOUT min)"
+            echo "::error::Timeout exceeded ($TIMEOUT min); stopping CodeBuild build $BUILD_ID"
+            aws codebuild stop-build --id "$BUILD_ID" 2>/dev/null || true
+            exit 1
           fi
 
       - name: Fetch CodeBuild logs
