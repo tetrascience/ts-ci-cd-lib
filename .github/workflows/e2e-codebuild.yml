@@ -242,6 +242,7 @@ jobs:
         id: codebuild
         env:
           BASE_URL: ${{ steps.env.outputs.base_url }}
+          SERVICE_NAME: ${{ github.event.repository.name }}
           JFROG_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
           JFROG_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
           CALLER_ENV_VARS: ${{ inputs.env_vars_json }}
@@ -256,6 +257,7 @@ jobs:
 
           BUILTIN_VARS=$(jq -nc '[
             {"name":"E2E_BASE_URL","value":env.BASE_URL},
+            {"name":"E2E_SERVICE_NAME","value":env.SERVICE_NAME},
             {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
