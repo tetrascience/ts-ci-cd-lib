@@ -50,9 +50,6 @@ on:
         required: true
       JFROG_ARTIFACTORY_READ_NPM_AUTH:
         required: true
-      E2E_AUTH_TOKEN:
-        description: "Auth token for E2E tests (passed to CodeBuild as E2E_TS_AUTH_TOKEN)"
-        required: true
       GITHUB_PAT:
         description: "PAT with cross-repo access and contents:write for deploy push"
         required: true
@@ -245,7 +242,6 @@ jobs:
         id: codebuild
         env:
           BASE_URL: ${{ steps.env.outputs.base_url }}
-          AUTH_TOKEN: ${{ secrets.E2E_AUTH_TOKEN }}
           JFROG_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
           JFROG_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
           CALLER_ENV_VARS: ${{ inputs.env_vars_json }}
@@ -260,7 +256,6 @@ jobs:
 
           BUILTIN_VARS=$(jq -nc '[
             {"name":"E2E_BASE_URL","value":env.BASE_URL},
-            {"name":"E2E_TS_AUTH_TOKEN","value":env.AUTH_TOKEN},
             {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
