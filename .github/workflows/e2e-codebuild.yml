@@ -20,11 +20,6 @@ on:
         type: string
         default: "ci.yml"
         required: false
-      env_vars_json:
-        description: 'JSON object of env vars to pass to CodeBuild (e.g. {"KEY": "value"})'
-        type: string
-        default: "{}"
-        required: false
       image_override:
         description: "Override the CodeBuild base image (e.g. mcr.microsoft.com/playwright:v1.52.0-noble)"
         type: string
@@ -230,7 +225,6 @@ jobs:
           SERVICE_NAME: ${{ github.event.repository.name }}
           JFROG_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
           JFROG_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
-          CALLER_ENV_VARS: ${{ inputs.env_vars_json }}
           S3_LOCATION: ${{ steps.source.outputs.s3_location }}
           BUILDSPEC_PATH: ${{ inputs.buildspec }}
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
@@ -238,16 +232,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          CALLER_VARS=$(echo "$CALLER_ENV_VARS" | jq '[to_entries[] | {name: .key, value: .value}]')
-
-          BUILTIN_VARS=$(jq -nc '[
+          ENV_VARS=$(jq -nc '[
             {"name":"E2E_ENVIRONMENT","value":env.TARGET_ENV},
             {"name":"E2E_BASE_URL","value":env.BASE_URL},
             {"name":"E2E_SERVICE_NAME","value":env.SERVICE_NAME},
             {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
-          ENV_VARS=$(echo "$BUILTIN_VARS" | jq --argjson caller "$CALLER_VARS" '. + $caller')
 
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
