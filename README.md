@@ -5,11 +5,49 @@ Reusable CI/CD workflows for TetraScience repositories.
 ## Table of Contents <!-- omit in toc -->
 
 - [Workflows](#workflows)
-  - [e2e-codebuild](#e2e-codebuild)
   - [publish-npm-package](#publish-npm-package)
   - [check-links](#check-links)
+  - [e2e-codebuild](#e2e-codebuild)
 
 ## Workflows
+
+### publish-npm-package
+
+Publishes npm packages to JFrog Artifactory or the public npm registry.
+
+#### Usage
+
+```yaml
+jobs:
+  publish:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/publish-npm-package.yml@main
+    with:
+      node_version: "20"
+    secrets:
+      AUTH_TOKEN: ${{ secrets.JFROG_AUTH_TOKEN }}
+      REGISTRY: ${{ secrets.JFROG_NPM_REGISTRY }}
+      PUBLISH_REGISTRY: ${{ secrets.JFROG_NPM_PUBLISH_REGISTRY }}
+```
+
+Supports `working_directory` for subdirectory packages, `prerelease_tag` for pre-releases, and `publish_to_public_npm` for public registry.
+
+---
+
+### check-links
+
+Checks broken links in markdown files using [lychee](https://lychee.cli.rs/).
+
+#### Usage
+
+```yaml
+jobs:
+  check-links:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/check-links.yml@main
+```
+
+Requires a `lychee.toml` config in the caller repo root.
+
+---
 
 ### e2e-codebuild
 
@@ -45,25 +83,7 @@ jobs:
 
 #### Environment config
 
-Non-secret test configuration (org slugs, app IDs, subdomain bases, etc.) should live in the service repo as a static config file (e.g. `test/e2e/environments.json`) keyed by environment name. The workflow passes `E2E_ENVIRONMENT` so tests can select the right config at runtime. Only actual secrets (auth tokens) belong in SSM.
-
-Example `test/e2e/environments.json`:
-
-```json
-{
-  "predev5": {
-    "baseUrl": "https://api.ts-predev5.tetrascience.com",
-    "orgSlug": "tetrascience",
-    "appSlug": "my-app",
-    "ownAppId": "381c0e17-..."
-  },
-  "dev": {
-    "baseUrl": "https://api.tetrascience-dev.com",
-    "orgSlug": "tetrascience",
-    "appSlug": "my-app"
-  }
-}
-```
+Non-secret test configuration (org slugs, app IDs, subdomain bases, etc.) should live in the service repo as a static config file (e.g. `test/e2e/environments.ts`) keyed by environment name. The workflow passes `E2E_ENVIRONMENT` so tests can select the right config at runtime. Only actual secrets (auth tokens) belong in SSM.
 
 #### Buildspec
 
@@ -146,41 +166,3 @@ aws ssm put-parameter \
   --value "<token>" \
   --profile <env> --region <region>
 ```
-
----
-
-### publish-npm-package
-
-Publishes npm packages to JFrog Artifactory or the public npm registry.
-
-#### Usage
-
-```yaml
-jobs:
-  publish:
-    uses: tetrascience/ts-ci-cd-lib/.github/workflows/publish-npm-package.yml@main
-    with:
-      node_version: "20"
-    secrets:
-      AUTH_TOKEN: ${{ secrets.JFROG_AUTH_TOKEN }}
-      REGISTRY: ${{ secrets.JFROG_NPM_REGISTRY }}
-      PUBLISH_REGISTRY: ${{ secrets.JFROG_NPM_PUBLISH_REGISTRY }}
-```
-
-Supports `working_directory` for subdirectory packages, `prerelease_tag` for pre-releases, and `publish_to_public_npm` for public registry.
-
----
-
-### check-links
-
-Checks broken links in markdown files using [lychee](https://lychee.cli.rs/).
-
-#### Usage
-
-```yaml
-jobs:
-  check-links:
-    uses: tetrascience/ts-ci-cd-lib/.github/workflows/check-links.yml@main
-```
-
-Requires a `lychee.toml` config in the caller repo root.
