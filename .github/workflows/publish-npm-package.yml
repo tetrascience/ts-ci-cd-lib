@@ -68,6 +68,11 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
 
+      - name: Enable Corepack
+        run: |
+          corepack enable
+          echo "Yarn version: $(yarn --version)"
+
       - name: Install npm for OIDC support
         if: inputs.publish_to_public_npm == true
         run: |
