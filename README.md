@@ -43,11 +43,41 @@ jobs:
       GITHUB_PAT: ${{ secrets.ARTIFACT_BUILD_GITHUB_TS_DEVOPS_PAT }}
 ```
 
+#### Environment config
+
+Non-secret test configuration (org slugs, app IDs, subdomain bases, etc.) should live in the service repo as a static config file (e.g. `test/e2e/environments.json`) keyed by environment name. The workflow passes `E2E_ENVIRONMENT` so tests can select the right config at runtime. Only actual secrets (auth tokens) belong in SSM.
+
+Example `test/e2e/environments.json`:
+
+```json
+{
+  "predev5": {
+    "baseUrl": "https://api.ts-predev5.tetrascience.com",
+    "orgSlug": "tetrascience",
+    "appSlug": "my-app",
+    "ownAppId": "381c0e17-..."
+  },
+  "dev": {
+    "baseUrl": "https://api.tetrascience-dev.com",
+    "orgSlug": "tetrascience",
+    "appSlug": "my-app"
+  }
+}
+```
+
 #### Buildspec
 
-Each service provides its own `buildspec.e2e.yml`. The workflow passes `E2E_BASE_URL`, `E2E_SERVICE_NAME`, `JFROG_ARTIFACTORY_URL`, and `JFROG_ARTIFACTORY_AUTH` as CodeBuild environment variables. Additional env vars can be passed via `env_vars_json`.
+Each service provides its own `buildspec.e2e.yml`. The workflow passes the following as CodeBuild environment variables:
 
-The auth token is read from SSM at `/tdp/e2e/{E2E_SERVICE_NAME}/auth-token` — each service has its own token per account.
+| Variable | Description |
+|----------|-------------|
+| `E2E_ENVIRONMENT` | Target environment name (e.g. `predev5`, `dev`) |
+| `E2E_BASE_URL` | API base URL for the target environment |
+| `E2E_SERVICE_NAME` | Repository name (used for SSM path) |
+| `JFROG_ARTIFACTORY_URL` | JFrog npm registry URL |
+| `JFROG_ARTIFACTORY_AUTH` | JFrog npm credentials |
+
+The auth token should be read from SSM at `/tdp/e2e/{E2E_SERVICE_NAME}/auth-token` — each service has its own token per account.
 
 Example buildspec:
 
@@ -85,7 +115,6 @@ phases:
 | `deploy_paths` | **Yes** | | Globs that trigger deploy. Empty = skip deploy. |
 | `buildspec` | **Yes** | | Path to buildspec in the caller repo |
 | `deploy_workflow` | No | `ci.yml` | Workflow waited on after pushing to env branch |
-| `env_vars_json` | No | `{}` | Extra env vars as `{"KEY": "value"}` |
 | `image_override` | No | | Override CodeBuild image |
 | `compute_type_override` | No | | Override CodeBuild compute (e.g. `BUILD_GENERAL1_MEDIUM`) |
 | `timeout_minutes` | No | `20` | Max minutes for the E2E job |
