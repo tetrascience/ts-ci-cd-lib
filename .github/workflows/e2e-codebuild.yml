@@ -225,6 +225,7 @@ jobs:
       - name: Start CodeBuild
         id: codebuild
         env:
+          TARGET_ENV: ${{ inputs.environment }}
           BASE_URL: ${{ steps.env.outputs.base_url }}
           SERVICE_NAME: ${{ github.event.repository.name }}
           JFROG_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
@@ -240,6 +241,7 @@ jobs:
           CALLER_VARS=$(echo "$CALLER_ENV_VARS" | jq '[to_entries[] | {name: .key, value: .value}]')
 
           BUILTIN_VARS=$(jq -nc '[
+            {"name":"E2E_ENVIRONMENT","value":env.TARGET_ENV},
             {"name":"E2E_BASE_URL","value":env.BASE_URL},
             {"name":"E2E_SERVICE_NAME","value":env.SERVICE_NAME},
             {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
