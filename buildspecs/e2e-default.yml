@@ -1,14 +1,13 @@
 version: 0.2
 
-env:
-  parameter-store:
-    E2E_TS_AUTH_TOKEN: /tdp/e2e/${E2E_SERVICE_NAME}/auth-token
-
 phases:
   install:
     runtime-versions:
       nodejs: 20
     commands:
+      - |
+        SSM_PATH="/tdp/e2e/${E2E_SERVICE_NAME}/auth-token"
+        export E2E_TS_AUTH_TOKEN=$(aws ssm get-parameter --name "$SSM_PATH" --with-decryption --query 'Parameter.Value' --output text)
       - npm install -g corepack
       - corepack enable
       - corepack prepare yarn@4.0.2 --activate
