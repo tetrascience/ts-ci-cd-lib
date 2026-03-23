@@ -28,7 +28,7 @@ runs:
   using: composite
   steps:
     - name: Upload base coverage for PR comparison
-      if: github.ref == 'refs/heads/main'
+      # TODO: restore to main-only before merge: if: github.ref == 'refs/heads/main'
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.base-coverage-artifact-name }}
@@ -46,15 +46,15 @@ runs:
         WORKFLOW=$(echo "${{ github.workflow_ref }}" | sed 's|.*\.github/workflows/||; s|@.*||')
         echo "workflow=$WORKFLOW" >> "$GITHUB_OUTPUT"
 
+    # TODO: restore cross-run download before merge:
+    #   uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
+    #   with: { name: ..., branch: main, workflow: ..., path: base-coverage/, github_token: ... }
     - name: Download base coverage from main
       if: github.event_name == 'pull_request'
-      uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
+      uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.base-coverage-artifact-name }}
-        branch: main
-        workflow: ${{ steps.resolve-workflow.outputs.workflow }}
         path: base-coverage/
-        github_token: ${{ github.token }}
       continue-on-error: true
       id: base-download
 
