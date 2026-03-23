@@ -83,8 +83,6 @@ runs:
         NEW_CODE_THRESHOLD: ${{ inputs.new-code-threshold }}
         SOURCE_FILE_PATTERN: ${{ inputs.source-file-pattern }}
         SOURCE_FILE_EXCLUDE: ${{ inputs.source-file-exclude }}
-        GH_REPOSITORY: ${{ github.repository }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
         COVERAGE_PATH: ${{ inputs.coverage-path }}
       run: |
         set -euo pipefail
@@ -114,7 +112,7 @@ runs:
 
         # 2. Check changed source files meet new-code threshold
         if [ "$NEW_CODE_THRESHOLD" -gt 0 ] && [ -f "${COVERAGE_PATH}coverage-final.json" ]; then
-          CHANGED_FILES=$(gh api "repos/${GH_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename' \
+          CHANGED_FILES=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${{ github.event.pull_request.number }}/files" --jq '.[].filename' \
             | grep -E "$SOURCE_FILE_PATTERN" \
             | grep -vE "$SOURCE_FILE_EXCLUDE" \
             | grep -vE '/index\.(ts|tsx)$') || true
