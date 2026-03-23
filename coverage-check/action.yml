@@ -15,8 +15,8 @@ inputs:
     description: "Number of days to retain the base coverage artifact"
     default: "90"
   caller-workflow:
-    description: "Filename of the caller workflow (for cross-run base coverage download)"
-    required: true
+    description: "Filename of the caller workflow (for cross-run base coverage download). Defaults to current workflow."
+    default: ""
   new-code-threshold:
     description: "Minimum statement coverage % for changed source files (0 to disable)"
     default: "95"
@@ -40,13 +40,25 @@ runs:
         overwrite: true
 
     # --- PR reporting + enforcement (only on pull requests) ---
+    - name: Resolve caller workflow
+      if: github.event_name == 'pull_request'
+      id: resolve-workflow
+      shell: bash
+      run: |
+        WORKFLOW="${{ inputs.caller-workflow }}"
+        if [ -z "$WORKFLOW" ]; then
+          # Extract filename from github.workflow_ref (e.g. owner/repo/.github/workflows/ci.yml@refs/heads/main)
+          WORKFLOW=$(echo "${{ github.workflow_ref }}" | sed 's|.*\.github/workflows/||; s|@.*||')
+        fi
+        echo "workflow=$WORKFLOW" >> "$GITHUB_OUTPUT"
+
     - name: Download base coverage from main
       if: github.event_name == 'pull_request'
       uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
       with:
         name: ${{ inputs.base-coverage-artifact-name }}
         branch: main
-        workflow: ${{ inputs.caller-workflow }}
+        workflow: ${{ steps.resolve-workflow.outputs.workflow }}
         path: base-coverage/
         github_token: ${{ github.token }}
       continue-on-error: true
