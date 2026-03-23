@@ -67,7 +67,7 @@ runs:
         json-summary-compare-path: ${{ steps.base-download.outcome == 'success' && 'base-coverage/coverage-summary.json' || '' }}
 
     - name: Enforce coverage rules
-      if: github.event_name == 'pull_request' && steps.base-download.outcome == 'success'
+      if: github.event_name == 'pull_request'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -75,58 +75,64 @@ runs:
         SOURCE_FILE_PATTERN: ${{ inputs.source-file-pattern }}
         SOURCE_FILE_EXCLUDE: ${{ inputs.source-file-exclude }}
         COVERAGE_PATH: ${{ inputs.coverage-path }}
+        BASE_DOWNLOAD_OUTCOME: ${{ steps.base-download.outcome }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
         set -euo pipefail
         FAILED=0
 
-        # Validate required coverage files exist
         if [ ! -f "${COVERAGE_PATH}coverage-summary.json" ]; then
           echo "::error::${COVERAGE_PATH}coverage-summary.json not found"
           exit 1
         fi
-        if [ ! -f base-coverage/coverage-summary.json ]; then
-          echo "::error::base-coverage/coverage-summary.json not found"
-          exit 1
+
+        # 1. Check overall coverage didn't decrease (only when base coverage exists)
+        if [ "$BASE_DOWNLOAD_OUTCOME" = "success" ] && [ -f base-coverage/coverage-summary.json ]; then
+          BASE_LINES=$(jq '.total.lines.pct' base-coverage/coverage-summary.json)
+          PR_LINES=$(jq '.total.lines.pct' "${COVERAGE_PATH}coverage-summary.json")
+
+          echo "Base coverage: ${BASE_LINES}%"
+          echo "PR coverage:   ${PR_LINES}%"
+
+          if jq -en --argjson pr "$PR_LINES" --argjson base "$BASE_LINES" '$pr < $base' > /dev/null 2>&1; then
+            echo "::error::Overall line coverage decreased from ${BASE_LINES}% to ${PR_LINES}%"
+            FAILED=1
+          fi
+        else
+          echo "No base coverage found — skipping regression check"
         fi
 
-        # 1. Check overall coverage didn't decrease
-        BASE_LINES=$(jq '.total.lines.pct' base-coverage/coverage-summary.json)
-        PR_LINES=$(jq '.total.lines.pct' "${COVERAGE_PATH}coverage-summary.json")
-
-        echo "Base coverage: ${BASE_LINES}%"
-        echo "PR coverage:   ${PR_LINES}%"
-
-        if jq -en --argjson pr "$PR_LINES" --argjson base "$BASE_LINES" '$pr < $base' > /dev/null 2>&1; then
-          echo "::error::Overall line coverage decreased from ${BASE_LINES}% to ${PR_LINES}%"
-          FAILED=1
-        fi
-
-        # 2. Check changed source files meet new-code threshold
-        if [ "$NEW_CODE_THRESHOLD" -gt 0 ] && [ -f "${COVERAGE_PATH}coverage-final.json" ]; then
-          CHANGED_FILES=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${{ github.event.pull_request.number }}/files" --jq '.[].filename' \
+        # 2. Check changed source files meet new-code threshold (always runs on PRs)
+        THRESHOLD=$(echo "$NEW_CODE_THRESHOLD" | awk '{printf "%d", $1+0.5}')
+        if [ "$THRESHOLD" -gt 0 ] && [ -f "${COVERAGE_PATH}coverage-final.json" ]; then
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename' \
             | grep -E "$SOURCE_FILE_PATTERN" \
             | grep -vE "$SOURCE_FILE_EXCLUDE" \
-            | grep -vE '/index\.(ts|tsx)$') || true
+            | grep -vE '/index\.(ts|tsx)$' \
+            | while IFS= read -r file; do
+              PCT=$(jq -r --arg f "$file" '
+                to_entries[]
+                | select(.key | endswith($f))
+                | .value.s
+                | to_entries
+                | if length == 0 then 100
+                  else ([.[].value] | (map(select(. > 0)) | length) / length * 100)
+                  end
+              ' "${COVERAGE_PATH}coverage-final.json" 2>/dev/null)
 
-          for file in $CHANGED_FILES; do
-            PCT=$(jq -r --arg f "$file" '
-              to_entries[]
-              | select(.key | endswith($f))
-              | .value.s
-              | to_entries
-              | if length == 0 then 100
-                else ([.[].value] | (map(select(. > 0)) | length) / length * 100)
-                end
-            ' "${COVERAGE_PATH}coverage-final.json" 2>/dev/null)
-
-            if [ -n "$PCT" ] && [ "$PCT" != "null" ]; then
-              ROUNDED=$(echo "$PCT" | awk '{printf "%d", $1}')
-              if [ "$ROUNDED" -lt "$NEW_CODE_THRESHOLD" ]; then
-                echo "::error file=$file::Coverage is ${ROUNDED}% (required: ${NEW_CODE_THRESHOLD}%)"
-                FAILED=1
+              if [ -n "$PCT" ] && [ "$PCT" != "null" ]; then
+                ROUNDED=$(echo "$PCT" | awk '{printf "%d", $1+0.5}')
+                if [ "$ROUNDED" -lt "$THRESHOLD" ]; then
+                  echo "::error file=$file::Coverage is ${ROUNDED}% (required: ${THRESHOLD}%)"
+                  echo "FAILED" >> /tmp/coverage-check-failed
+                fi
               fi
-            fi
-          done
+            done || true
+
+          if [ -f /tmp/coverage-check-failed ]; then
+            FAILED=1
+            rm -f /tmp/coverage-check-failed
+          fi
         fi
 
         if [ "$FAILED" -eq 1 ]; then
