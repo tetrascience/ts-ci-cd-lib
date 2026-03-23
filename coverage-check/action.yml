@@ -14,9 +14,6 @@ inputs:
   base-retention-days:
     description: "Number of days to retain the base coverage artifact"
     default: "90"
-  caller-workflow:
-    description: "Filename of the caller workflow (for cross-run base coverage download). Defaults to current workflow."
-    default: ""
   new-code-threshold:
     description: "Minimum statement coverage % for changed source files (0 to disable)"
     default: "95"
@@ -45,11 +42,8 @@ runs:
       id: resolve-workflow
       shell: bash
       run: |
-        WORKFLOW="${{ inputs.caller-workflow }}"
-        if [ -z "$WORKFLOW" ]; then
-          # Extract filename from github.workflow_ref (e.g. owner/repo/.github/workflows/ci.yml@refs/heads/main)
-          WORKFLOW=$(echo "${{ github.workflow_ref }}" | sed 's|.*\.github/workflows/||; s|@.*||')
-        fi
+        # Extract filename from github.workflow_ref (e.g. owner/repo/.github/workflows/ci.yml@refs/heads/main)
+        WORKFLOW=$(echo "${{ github.workflow_ref }}" | sed 's|.*\.github/workflows/||; s|@.*||')
         echo "workflow=$WORKFLOW" >> "$GITHUB_OUTPUT"
 
     - name: Download base coverage from main
