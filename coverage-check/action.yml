@@ -81,6 +81,7 @@ runs:
         json-summary-path: ${{ inputs.coverage-path }}coverage-summary.json
         json-final-path: ${{ inputs.coverage-path }}coverage-final.json
         json-summary-compare-path: ${{ steps.base-download.outcome == 'success' && 'base-coverage/coverage-summary.json' || '' }}
+        threshold-icons: '{"red": 0, "green": 100}'
 
     - name: Enforce coverage rules
       if: github.event_name == 'pull_request'
