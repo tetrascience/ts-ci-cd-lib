@@ -41,9 +41,11 @@ runs:
       if: github.event_name == 'pull_request'
       id: resolve-workflow
       shell: bash
+      env:
+        WORKFLOW_REF: ${{ github.workflow_ref }}
       run: |
         # Extract filename from github.workflow_ref (e.g. owner/repo/.github/workflows/ci.yml@refs/heads/main)
-        WORKFLOW=$(echo "${{ github.workflow_ref }}" | sed 's|.*\.github/workflows/||; s|@.*||')
+        WORKFLOW=$(echo "$WORKFLOW_REF" | sed 's|.*\.github/workflows/||; s|@.*||')
         echo "workflow=$WORKFLOW" >> "$GITHUB_OUTPUT"
 
     - name: Download base coverage from main
