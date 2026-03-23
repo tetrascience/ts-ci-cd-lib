@@ -32,9 +32,6 @@ inputs:
   source-file-exclude:
     description: "Grep regex for files to exclude from new-code threshold"
     default: '\.(test|spec|stories)\.(ts|tsx)$'
-  github-token:
-    description: "GitHub token for PR comments and API calls"
-    default: ${{ github.token }}
 
 runs:
   using: composite
@@ -66,7 +63,7 @@ runs:
         branch: main
         workflow: ${{ inputs.caller-workflow }}
         path: base-coverage/
-        github_token: ${{ inputs.github-token }}
+        github_token: ${{ github.token }}
       continue-on-error: true
       id: base-download
 
@@ -82,7 +79,7 @@ runs:
       if: github.event_name == 'pull_request' && steps.base-download.outcome == 'success'
       shell: bash
       env:
-        GH_TOKEN: ${{ inputs.github-token }}
+        GH_TOKEN: ${{ github.token }}
         NEW_CODE_THRESHOLD: ${{ inputs.new-code-threshold }}
         SOURCE_FILE_PATTERN: ${{ inputs.source-file-pattern }}
         SOURCE_FILE_EXCLUDE: ${{ inputs.source-file-exclude }}
