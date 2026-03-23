@@ -60,6 +60,20 @@ runs:
       continue-on-error: true
       id: base-download
 
+    - name: Delete previous coverage comment
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        COMMENT_ID=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+          --jq '.[] | select(.body | contains("vitest-coverage-report-marker")) | .id' | head -1)
+        if [ -n "$COMMENT_ID" ]; then
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}"
+          echo "Deleted previous coverage comment ($COMMENT_ID)"
+        fi
+
     - name: Report coverage on PR
       if: github.event_name == 'pull_request'
       uses: davelosert/vitest-coverage-report-action@2500dafcee7dd64f85ab689c0b83798a8359770e # v2
