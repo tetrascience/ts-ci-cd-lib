@@ -60,14 +60,27 @@ jobs:
           json-summary-compare-path: ${{ steps.base-download.outcome == 'success' && 'base-coverage/coverage-summary.json' || '' }}
 
       - name: Enforce coverage rules
-        if: steps.base-download.outcome == 'success'
+        if: steps.base-download.outcome == 'success' && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           NEW_CODE_THRESHOLD: ${{ inputs.new-code-threshold }}
           SOURCE_FILE_PATTERN: ${{ inputs.source-file-pattern }}
           SOURCE_FILE_EXCLUDE: ${{ inputs.source-file-exclude }}
+          GH_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          set -euo pipefail
           FAILED=0
+
+          # Validate required coverage files exist
+          if [ ! -f coverage/coverage-summary.json ]; then
+            echo "::error::coverage/coverage-summary.json not found"
+            exit 1
+          fi
+          if [ ! -f base-coverage/coverage-summary.json ]; then
+            echo "::error::base-coverage/coverage-summary.json not found"
+            exit 1
+          fi
 
           # 1. Check overall coverage didn't decrease
           BASE_LINES=$(jq '.total.lines.pct' base-coverage/coverage-summary.json)
@@ -76,14 +89,14 @@ jobs:
           echo "Base coverage: ${BASE_LINES}%"
           echo "PR coverage:   ${PR_LINES}%"
 
-          if [ "$(echo "$PR_LINES < $BASE_LINES" | bc -l)" -eq 1 ]; then
+          if jq -en --argjson pr "$PR_LINES" --argjson base "$BASE_LINES" '$pr < $base' > /dev/null 2>&1; then
             echo "::error::Overall line coverage decreased from ${BASE_LINES}% to ${PR_LINES}%"
             FAILED=1
           fi
 
           # 2. Check changed source files meet new-code threshold
-          if [ "$NEW_CODE_THRESHOLD" -gt 0 ]; then
-            CHANGED_FILES=$(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files --jq '.[].filename' \
+          if [ "$NEW_CODE_THRESHOLD" -gt 0 ] && [ -f coverage/coverage-final.json ]; then
+            CHANGED_FILES=$(gh api "repos/${GH_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename' \
               | grep -E "$SOURCE_FILE_PATTERN" \
               | grep -vE "$SOURCE_FILE_EXCLUDE" \
               | grep -vE '/index\.(ts|tsx)$') || true
@@ -102,7 +115,7 @@ jobs:
               if [ -n "$PCT" ] && [ "$PCT" != "null" ]; then
                 ROUNDED=$(echo "$PCT" | awk '{printf "%d", $1}')
                 if [ "$ROUNDED" -lt "$NEW_CODE_THRESHOLD" ]; then
-                  echo "::warning file=$file::Coverage is ${ROUNDED}% (required: ${NEW_CODE_THRESHOLD}%)"
+                  echo "::error file=$file::Coverage is ${ROUNDED}% (required: ${NEW_CODE_THRESHOLD}%)"
                   FAILED=1
                 fi
               fi
