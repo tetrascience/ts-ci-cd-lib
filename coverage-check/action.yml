@@ -1,22 +1,16 @@
-name: Coverage
+name: Coverage Check
 description: >
-  All-in-one coverage action: upload artifacts, post PR comment with
-  trend comparison, and enforce coverage rules (no regression + new-code
-  threshold). Run this as a step after your test command.
+  Post PR comment with trend comparison and enforce coverage rules
+  (no regression + new-code threshold). On main pushes, uploads
+  base coverage for future PR comparisons.
 
 inputs:
   coverage-path:
     description: "Path to the coverage output directory"
     default: "coverage/"
-  coverage-artifact-name:
-    description: "Name of the coverage artifact"
-    default: "coverage"
   base-coverage-artifact-name:
     description: "Name of the base coverage artifact (uploaded on main only)"
     default: "base-coverage"
-  retention-days:
-    description: "Number of days to retain the coverage artifact"
-    default: "30"
   base-retention-days:
     description: "Number of days to retain the base coverage artifact"
     default: "90"
@@ -36,15 +30,6 @@ inputs:
 runs:
   using: composite
   steps:
-    # --- Upload artifacts ---
-    - name: Upload coverage artifacts
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ inputs.coverage-artifact-name }}
-        path: ${{ inputs.coverage-path }}
-        retention-days: ${{ inputs.retention-days }}
-
     - name: Upload base coverage for PR comparison
       if: github.ref == 'refs/heads/main'
       uses: actions/upload-artifact@v4
