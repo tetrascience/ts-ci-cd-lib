@@ -103,8 +103,13 @@ runs:
         fi
 
         # 2. Check changed source files meet new-code threshold (always runs on PRs)
-        THRESHOLD=$(echo "$NEW_CODE_THRESHOLD" | awk '{printf "%d", $1+0.5}')
-        if [ "$THRESHOLD" -gt 0 ] && [ -f "${COVERAGE_PATH}coverage-final.json" ]; then
+        THRESHOLD=$(echo "$NEW_CODE_THRESHOLD" | awk '{printf "%d", $1}')
+        if [ "$THRESHOLD" -gt 0 ]; then
+          if [ ! -f "${COVERAGE_PATH}coverage-final.json" ]; then
+            echo "::error::${COVERAGE_PATH}coverage-final.json not found but new-code threshold is ${THRESHOLD}%"
+            exit 1
+          fi
+
           gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename' \
             | grep -E "$SOURCE_FILE_PATTERN" \
             | grep -vE "$SOURCE_FILE_EXCLUDE" \
@@ -120,10 +125,13 @@ runs:
                   end
               ' "${COVERAGE_PATH}coverage-final.json" 2>/dev/null)
 
-              if [ -n "$PCT" ] && [ "$PCT" != "null" ]; then
-                ROUNDED=$(echo "$PCT" | awk '{printf "%d", $1+0.5}')
-                if [ "$ROUNDED" -lt "$THRESHOLD" ]; then
-                  echo "::error file=$file::Coverage is ${ROUNDED}% (required: ${THRESHOLD}%)"
+              if [ -z "$PCT" ] || [ "$PCT" = "null" ]; then
+                echo "::error file=$file::No coverage data found (treated as 0%)"
+                echo "FAILED" >> /tmp/coverage-check-failed
+              else
+                FLOORED=$(echo "$PCT" | awk '{printf "%d", $1}')
+                if [ "$FLOORED" -lt "$THRESHOLD" ]; then
+                  echo "::error file=$file::Coverage is ${FLOORED}% (required: ${THRESHOLD}%)"
                   echo "FAILED" >> /tmp/coverage-check-failed
                 fi
               fi
