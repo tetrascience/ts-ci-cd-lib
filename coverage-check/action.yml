@@ -81,6 +81,7 @@ runs:
         json-summary-path: ${{ inputs.coverage-path }}coverage-summary.json
         json-final-path: ${{ inputs.coverage-path }}coverage-final.json
         json-summary-compare-path: ${{ steps.base-download.outcome == 'success' && 'base-coverage/coverage-summary.json' || '' }}
+        vite-config-path: __nonexistent__
         threshold-icons: '{"0": "🔴", "1": "🟢"}'
 
     - name: Enforce coverage rules
