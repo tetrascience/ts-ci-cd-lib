@@ -1,0 +1,168 @@
+name: Coverage Check
+description: >
+  Post PR comment with trend comparison and enforce coverage rules
+  (no regression + new-code threshold). On main pushes, uploads
+  base coverage for future PR comparisons.
+
+inputs:
+  coverage-path:
+    description: "Path to the coverage output directory"
+    default: "coverage/"
+  base-coverage-artifact-name:
+    description: "Name of the base coverage artifact (uploaded on main only)"
+    default: "base-coverage"
+  base-retention-days:
+    description: "Number of days to retain the base coverage artifact"
+    default: "90"
+  new-code-threshold:
+    description: "Minimum statement coverage % for changed source files (0 to disable)"
+    default: "95"
+  source-file-pattern:
+    description: "Grep regex for source files to enforce new-code threshold on"
+    default: '^src/.*\.(ts|tsx)$'
+  source-file-exclude:
+    description: "Grep regex for files to exclude from new-code threshold"
+    default: '\.(test|spec|stories)\.(ts|tsx)$'
+
+runs:
+  using: composite
+  steps:
+    - name: Upload base coverage for PR comparison
+      if: github.ref == 'refs/heads/main'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.base-coverage-artifact-name }}
+        path: ${{ inputs.coverage-path }}coverage-summary.json
+        retention-days: ${{ inputs.base-retention-days }}
+        overwrite: true
+
+    # --- PR reporting + enforcement (only on pull requests) ---
+    - name: Resolve caller workflow
+      if: github.event_name == 'pull_request'
+      id: resolve-workflow
+      shell: bash
+      env:
+        WORKFLOW_REF: ${{ github.workflow_ref }}
+      run: |
+        # Extract filename from github.workflow_ref (e.g. owner/repo/.github/workflows/ci.yml@refs/heads/main)
+        WORKFLOW=$(echo "$WORKFLOW_REF" | sed 's|.*\.github/workflows/||; s|@.*||')
+        echo "workflow=$WORKFLOW" >> "$GITHUB_OUTPUT"
+
+    - name: Download base coverage from main
+      if: github.event_name == 'pull_request'
+      uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
+      with:
+        name: ${{ inputs.base-coverage-artifact-name }}
+        branch: main
+        workflow: ${{ steps.resolve-workflow.outputs.workflow }}
+        path: base-coverage/
+        github_token: ${{ github.token }}
+      continue-on-error: true
+      id: base-download
+
+    - name: Delete previous coverage comment
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        COMMENT_ID=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+          --jq '.[] | select(.body | contains("vitest-coverage-report-marker")) | .id' | head -1)
+        if [ -n "$COMMENT_ID" ]; then
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}"
+          echo "Deleted previous coverage comment ($COMMENT_ID)"
+        fi
+
+    - name: Report coverage on PR
+      if: github.event_name == 'pull_request'
+      uses: davelosert/vitest-coverage-report-action@2500dafcee7dd64f85ab689c0b83798a8359770e # v2
+      with:
+        json-summary-path: ${{ inputs.coverage-path }}coverage-summary.json
+        json-final-path: ${{ inputs.coverage-path }}coverage-final.json
+        json-summary-compare-path: ${{ steps.base-download.outcome == 'success' && 'base-coverage/coverage-summary.json' || '' }}
+        threshold-icons: '{"0": "🔴", "1": "🟢"}'
+
+    - name: Enforce coverage rules
+      if: github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        NEW_CODE_THRESHOLD: ${{ inputs.new-code-threshold }}
+        SOURCE_FILE_PATTERN: ${{ inputs.source-file-pattern }}
+        SOURCE_FILE_EXCLUDE: ${{ inputs.source-file-exclude }}
+        COVERAGE_PATH: ${{ inputs.coverage-path }}
+        BASE_DOWNLOAD_OUTCOME: ${{ steps.base-download.outcome }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+        FAILED=0
+
+        if [ ! -f "${COVERAGE_PATH}coverage-summary.json" ]; then
+          echo "::error::${COVERAGE_PATH}coverage-summary.json not found"
+          exit 1
+        fi
+
+        # 1. Check overall coverage didn't decrease (only when base coverage exists)
+        if [ "$BASE_DOWNLOAD_OUTCOME" = "success" ] && [ -f base-coverage/coverage-summary.json ]; then
+          BASE_LINES=$(jq '.total.lines.pct' base-coverage/coverage-summary.json)
+          PR_LINES=$(jq '.total.lines.pct' "${COVERAGE_PATH}coverage-summary.json")
+
+          echo "Base coverage: ${BASE_LINES}%"
+          echo "PR coverage:   ${PR_LINES}%"
+
+          if jq -en --argjson pr "$PR_LINES" --argjson base "$BASE_LINES" '$pr < $base' > /dev/null 2>&1; then
+            echo "::error::Overall line coverage decreased from ${BASE_LINES}% to ${PR_LINES}%"
+            FAILED=1
+          fi
+        else
+          echo "No base coverage found — skipping regression check"
+        fi
+
+        # 2. Check changed source files meet new-code threshold (always runs on PRs)
+        THRESHOLD=$(echo "$NEW_CODE_THRESHOLD" | awk '{printf "%d", $1}')
+        if [ "$THRESHOLD" -gt 0 ]; then
+          if [ ! -f "${COVERAGE_PATH}coverage-final.json" ]; then
+            echo "::error::${COVERAGE_PATH}coverage-final.json not found but new-code threshold is ${THRESHOLD}%"
+            exit 1
+          fi
+
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename' \
+            | grep -E "$SOURCE_FILE_PATTERN" \
+            | grep -vE "$SOURCE_FILE_EXCLUDE" \
+            | grep -vE '/index\.(ts|tsx)$' \
+            | while IFS= read -r file; do
+              PCT=$(jq -r --arg f "$file" '
+                to_entries[]
+                | select(.key | endswith($f))
+                | .value.s
+                | to_entries
+                | if length == 0 then 100
+                  else ([.[].value] | (map(select(. > 0)) | length) / length * 100)
+                  end
+              ' "${COVERAGE_PATH}coverage-final.json" 2>/dev/null)
+
+              if [ -z "$PCT" ] || [ "$PCT" = "null" ]; then
+                echo "::error file=$file::No coverage data found (treated as 0%)"
+                echo "FAILED" >> /tmp/coverage-check-failed
+              else
+                FLOORED=$(echo "$PCT" | awk '{printf "%d", $1}')
+                if [ "$FLOORED" -lt "$THRESHOLD" ]; then
+                  echo "::error file=$file::Coverage is ${FLOORED}% (required: ${THRESHOLD}%)"
+                  echo "FAILED" >> /tmp/coverage-check-failed
+                fi
+              fi
+            done || true
+
+          if [ -f /tmp/coverage-check-failed ]; then
+            FAILED=1
+            rm -f /tmp/coverage-check-failed
+          fi
+        fi
+
+        if [ "$FAILED" -eq 1 ]; then
+          echo "::error::Coverage checks failed. See above for details."
+          exit 1
+        fi
+
+        echo "All coverage checks passed."
