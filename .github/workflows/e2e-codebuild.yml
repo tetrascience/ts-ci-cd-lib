@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       environment:
-        description: "Target environment (e.g. predev5, dev)"
+        description: "Target environment (e.g. predev3, dev)"
         type: string
         required: true
       deploy_paths:
@@ -154,51 +154,60 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Checkout environment config
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          repository: tetrascience/ts-cloudformation-service
-          # TODO: remove ref after ts-cloudformation-service#3706 is merged to development
-          ref: SW-1336-e2e-ci
-          token: ${{ secrets.GITHUB_PAT }}
-          sparse-checkout: infrastructure/tdp-e2e-environments.yml
-          sparse-checkout-cone-mode: false
-          path: .infra
-
       - name: Resolve environment
         id: env
         env:
           TARGET_ENV: ${{ inputs.environment }}
         run: |
           set -euo pipefail
-          CONFIG=".infra/infrastructure/tdp-e2e-environments.yml"
-          ENV="$TARGET_ENV"
 
-          ACCOUNT=$(yq -r ".environments.${ENV}.account" "$CONFIG")
-          REGION=$(yq -r ".environments.${ENV}.region // .defaults.region" "$CONFIG")
-          BASE_URL=$(yq -r ".environments.${ENV}.base_url // \"\"" "$CONFIG")
+          # Environment → AWS account mapping.
+          # The E2E infra (CodeBuild, OIDC role, S3 bucket) is deployed as a
+          # substack of the TDP service stack via EnableE2E=true.
+          # Account IDs and regions are stable infrastructure facts.
+          declare -A ACCOUNTS=(
+            [predev]=611255221147
+            [predev2]=383434869204
+            [predev3]=866984931759
+            [predev4]=456932089055
+            [predev5]=734018046548
+            [predev6]=326392129485
+            [predev7]=901926888715
+            [predev8]=581141123528
+            [dev]=706717599419
+            [preuat]=555180171822
+          )
 
-          if [[ "$ACCOUNT" == "null" || -z "$ACCOUNT" ]]; then
-            echo "::error::Unknown environment: $ENV"
+          declare -A REGIONS=(
+            [preuat]=us-west-2
+          )
+
+          # CloudFormation Environment value used in IAM role names.
+          # All predev/dev environments use "development"; preuat uses "preuat".
+          declare -A CF_ENVIRONMENTS=(
+            [preuat]=preuat
+          )
+
+          ACCOUNT="${ACCOUNTS[$TARGET_ENV]:-}"
+          REGION="${REGIONS[$TARGET_ENV]:-us-east-2}"
+          CF_ENV="${CF_ENVIRONMENTS[$TARGET_ENV]:-development}"
+
+          if [[ -z "$ACCOUNT" ]]; then
+            echo "::error::Unknown environment: $TARGET_ENV"
             exit 1
           fi
 
-          if [[ -z "$BASE_URL" ]]; then
-            PATTERN=$(yq -r ".defaults.base_url_pattern" "$CONFIG")
-            BASE_URL="${PATTERN//\{env\}/$ENV}"
-          fi
-
-          echo "env=$ENV" >> "$GITHUB_OUTPUT"
+          echo "env=$TARGET_ENV" >> "$GITHUB_OUTPUT"
           echo "account=$ACCOUNT" >> "$GITHUB_OUTPUT"
           echo "region=$REGION" >> "$GITHUB_OUTPUT"
-          echo "base_url=$BASE_URL" >> "$GITHUB_OUTPUT"
+          echo "cf_env=$CF_ENV" >> "$GITHUB_OUTPUT"
           echo "source_bucket=tdp-e2e-source-${ACCOUNT}" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           aws-region: ${{ steps.env.outputs.region }}
-          role-to-assume: arn:aws:iam::${{ steps.env.outputs.account }}:role/gha-tdp-e2e-${{ steps.env.outputs.env }}
+          role-to-assume: arn:aws:iam::${{ steps.env.outputs.account }}:role/gha-tdp-e2e-${{ steps.env.outputs.cf_env }}
           role-session-name: e2e-codebuild
           role-skip-session-tagging: true
 
@@ -211,7 +220,7 @@ jobs:
         run: |
           set -euo pipefail
           S3_KEY="${REPO_NAME}/${COMMIT_SHA}.zip"
-          zip -r -q /tmp/source.zip . -x '.infra/*' '.git/*'
+          zip -r -q /tmp/source.zip . -x '.git/*'
           aws s3 cp /tmp/source.zip "s3://${SOURCE_BUCKET}/${S3_KEY}"
           echo "s3_location=${SOURCE_BUCKET}/${S3_KEY}" >> "$GITHUB_OUTPUT"
 
@@ -219,8 +228,6 @@ jobs:
         id: codebuild
         env:
           TARGET_ENV: ${{ inputs.environment }}
-          BASE_URL: ${{ steps.env.outputs.base_url }}
-          SERVICE_NAME: ${{ github.event.repository.name }}
           JFROG_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
           JFROG_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
           S3_LOCATION: ${{ steps.source.outputs.s3_location }}
@@ -232,8 +239,6 @@ jobs:
 
           ENV_VARS=$(jq -nc '[
             {"name":"E2E_ENVIRONMENT","value":env.TARGET_ENV},
-            {"name":"E2E_BASE_URL","value":env.BASE_URL},
-            {"name":"E2E_SERVICE_NAME","value":env.SERVICE_NAME},
             {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
