@@ -162,13 +162,11 @@ Each service provides its own `buildspec.e2e.yml`. The workflow passes the follo
 
 | Variable | Description |
 |----------|-------------|
-| `E2E_ENVIRONMENT` | Target environment name (e.g. `predev5`, `dev`) |
-| `E2E_BASE_URL` | API base URL for the target environment |
-| `E2E_SERVICE_NAME` | Repository name (used for SSM path) |
+| `E2E_ENVIRONMENT` | Target environment name (e.g. `predev3`, `dev`) |
 | `JFROG_ARTIFACTORY_URL` | JFrog npm registry URL |
 | `JFROG_ARTIFACTORY_AUTH` | JFrog npm credentials |
 
-The auth token should be read from SSM at `/tdp/e2e/{E2E_SERVICE_NAME}/auth-token` — each service has its own token per account.
+Authentication is handled by each service's test setup (e.g. a `globalSetup` that reads the TDP admin password from SSM and logs in). The CodeBuild IAM role has access to read SSM parameters under `/tetrascience/{environment}/platform/ADMIN_PASSWORD`.
 
 Example buildspec:
 
@@ -180,12 +178,10 @@ phases:
     runtime-versions:
       nodejs: 20
     commands:
-      - |
-        SSM_PATH="/tdp/e2e/${E2E_SERVICE_NAME}/auth-token"
-        export E2E_TS_AUTH_TOKEN=$(aws ssm get-parameter --name "$SSM_PATH" --with-decryption --query 'Parameter.Value' --output text)
       - npm install -g corepack
       - corepack enable
-      - corepack prepare yarn@4.0.2 --activate
+      - YARN_VERSION=$(node -p "require('./package.json').packageManager.split('@')[1]")
+      - corepack prepare "yarn@$YARN_VERSION" --activate
       - |
         if [ -n "$JFROG_ARTIFACTORY_URL" ]; then
           yarn config set npmRegistryServer "$JFROG_ARTIFACTORY_URL"
@@ -209,6 +205,8 @@ phases:
 | `image_override` | No | | Override CodeBuild image |
 | `compute_type_override` | No | | Override CodeBuild compute (e.g. `BUILD_GENERAL1_MEDIUM`) |
 | `timeout_minutes` | No | `25` | Max minutes for the E2E job |
+| `ecs_cluster` | No | | ECS cluster to wait for stability after deploy |
+| `ecs_service` | No | | ECS service to wait for stability after deploy |
 
 #### Secrets
 
@@ -226,14 +224,4 @@ phases:
 
 #### Infrastructure
 
-The shared CodeBuild project (`tdp-e2e`) must be deployed per environment. See [`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml).
-
-To provision a new service's auth token:
-
-```sh
-aws ssm put-parameter \
-  --name "/tdp/e2e/<repo-name>/auth-token" \
-  --type SecureString \
-  --value "<token>" \
-  --profile <env> --region <region>
-```
+The shared CodeBuild project (`tdp-e2e`) must be deployed per environment via `EnableE2E=true` in the TDP service stack. See [`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml).
