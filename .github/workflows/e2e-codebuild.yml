@@ -33,14 +33,6 @@ on:
         type: number
         default: 25
         required: false
-      ecs_cluster:
-        description: "ECS cluster name to wait for service stability after deploy (e.g. ts-predev3-development). Skipped if empty."
-        type: string
-        required: false
-      ecs_service:
-        description: "ECS service name to wait for stability after deploy. Required if ecs_cluster is set."
-        type: string
-        required: false
     secrets:
       JFROG_ARTIFACTORY_NPM_VIRTUAL_URL:
         required: true
@@ -219,19 +211,6 @@ jobs:
           role-to-assume: arn:aws:iam::${{ steps.env.outputs.account }}:role/gha-tdp-e2e-${{ steps.env.outputs.cf_env }}
           role-session-name: e2e-codebuild
           role-skip-session-tagging: true
-
-      - name: Wait for ECS service to stabilize
-        if: ${{ inputs.ecs_cluster != '' && inputs.ecs_service != '' }}
-        env:
-          ECS_CLUSTER: ${{ inputs.ecs_cluster }}
-          ECS_SERVICE: ${{ inputs.ecs_service }}
-        run: |
-          echo "Waiting for ECS service $ECS_SERVICE in cluster $ECS_CLUSTER to stabilize..."
-          aws ecs wait services-stable \
-            --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE" \
-            && echo "ECS service is stable" \
-            || echo "::warning::ECS wait timed out — proceeding anyway"
 
       - name: Upload source to S3
         id: source

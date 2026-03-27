@@ -205,8 +205,6 @@ phases:
 | `image_override` | No | | Override CodeBuild image |
 | `compute_type_override` | No | | Override CodeBuild compute (e.g. `BUILD_GENERAL1_MEDIUM`) |
 | `timeout_minutes` | No | `25` | Max minutes for the E2E job |
-| `ecs_cluster` | No | | ECS cluster to wait for stability after deploy |
-| `ecs_service` | No | | ECS service to wait for stability after deploy |
 
 #### Secrets
 
