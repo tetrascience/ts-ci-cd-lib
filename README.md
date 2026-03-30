@@ -7,6 +7,7 @@ Reusable CI/CD workflows for TetraScience repositories.
 - [Workflows](#workflows)
   - [publish-npm-package](#publish-npm-package)
   - [check-links](#check-links)
+  - [e2e-codebuild](#e2e-codebuild)
 
 ## Workflows
 
@@ -40,6 +41,7 @@ jobs:
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `node_version` | Node.js version | No | `"20"` |
+| `working_directory` | Directory containing the package to publish | No | `"."` |
 | `prerelease_tag` | Prerelease tag for version suffix and npm dist-tag (e.g., alpha, beta). Leave empty for non-prerelease versions. | No | `""` |
 | `run_tests` | Whether to run tests before publishing | No | `true` |
 | `publish_to_public_npm` | Set to true to confirm publishing to public npm registry | No | `false` |
@@ -115,3 +117,109 @@ exclude = [
   "^https?://example\\.com",
 ]
 ```
+
+---
+
+### e2e-codebuild
+
+Deploys a service to a predev environment, runs E2E tests via CodeBuild, and streams results back to the PR.
+
+#### Usage
+
+```yaml
+name: E2E Tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  push:
+    branches: [development]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  e2e:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/e2e-codebuild.yml@main
+    with:
+      environment: predev5
+      deploy_paths: 'src/** migrations/** package.json yarn.lock Dockerfile'
+      buildspec: buildspec.e2e.yml
+    secrets:
+      JFROG_ARTIFACTORY_NPM_VIRTUAL_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
+      JFROG_ARTIFACTORY_READ_NPM_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+      GITHUB_PAT: ${{ secrets.ARTIFACT_BUILD_GITHUB_TS_DEVOPS_PAT }}
+```
+
+#### Environment config
+
+Non-secret test configuration (org slugs, app IDs, subdomain bases, etc.) should live in the service repo as a static config file (e.g. `test/e2e/environments.ts`) keyed by environment name. The workflow passes `E2E_ENVIRONMENT` so tests can select the right config at runtime. Only actual secrets (auth tokens) belong in SSM.
+
+#### Buildspec
+
+Each service provides its own `buildspec.e2e.yml`. The workflow passes the following as CodeBuild environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `E2E_ENVIRONMENT` | Target environment name (e.g. `predev3`, `dev`) |
+| `JFROG_ARTIFACTORY_URL` | JFrog npm registry URL |
+| `JFROG_ARTIFACTORY_AUTH` | JFrog npm credentials |
+
+Authentication is handled by each service's test setup (e.g. a `globalSetup` that reads the TDP admin password from SSM and logs in). The CodeBuild IAM role has access to read SSM parameters under `/tetrascience/{environment}/platform/ADMIN_PASSWORD`.
+
+Example buildspec:
+
+```yaml
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+    commands:
+      - npm install -g corepack
+      - corepack enable
+      - YARN_VERSION=$(node -p "require('./package.json').packageManager.split('@')[1]")
+      - corepack prepare "yarn@$YARN_VERSION" --activate
+      - |
+        if [ -n "$JFROG_ARTIFACTORY_URL" ]; then
+          yarn config set npmRegistryServer "$JFROG_ARTIFACTORY_URL"
+          yarn config set npmAuthIdent "$JFROG_ARTIFACTORY_AUTH"
+          yarn config set npmAlwaysAuth true
+        fi
+      - yarn install --immutable
+  build:
+    commands:
+      - yarn test:e2e
+```
+
+#### Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `environment` | **Yes** | | Target environment (e.g. `predev5`, `dev`) |
+| `deploy_paths` | **Yes** | | Globs that trigger deploy. Empty = skip deploy. |
+| `buildspec` | **Yes** | | Path to buildspec in the caller repo |
+| `deploy_workflow` | No | `ci.yml` | Workflow waited on after pushing to env branch |
+| `image_override` | No | | Override CodeBuild image |
+| `compute_type_override` | No | | Override CodeBuild compute (e.g. `BUILD_GENERAL1_MEDIUM`) |
+| `timeout_minutes` | No | `25` | Max minutes for the E2E job |
+
+#### Secrets
+
+| Secret | Description |
+|--------|-------------|
+| `JFROG_ARTIFACTORY_NPM_VIRTUAL_URL` | JFrog npm registry URL |
+| `JFROG_ARTIFACTORY_READ_NPM_AUTH` | JFrog npm credentials |
+| `GITHUB_PAT` | PAT for cross-repo access + deploy push |
+
+#### How it works
+
+1. **check-changes** — compares changed files against `deploy_paths`. Skipped if `deploy_paths` is empty.
+2. **deploy** — pushes to the env branch, waits for the deploy workflow to complete. Skipped if no service code changed.
+3. **e2e** — uploads source to S3, triggers CodeBuild, streams logs, writes job summary.
+
+#### Infrastructure
+
+The shared CodeBuild project (`tdp-e2e`) must be deployed per environment via `EnableE2E=true` in the TDP service stack. See [`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml).

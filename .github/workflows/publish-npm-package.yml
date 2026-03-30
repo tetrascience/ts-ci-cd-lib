@@ -8,6 +8,11 @@ on:
         type: string
         default: "20"
         required: false
+      working_directory:
+        description: "Directory containing the package to publish (default: repo root)"
+        type: string
+        default: "."
+        required: false
       prerelease_tag:
         description: "Prerelease tag for version suffix and npm dist-tag (e.g., alpha, beta). Leave empty for non-prerelease versions."
         type: string
@@ -35,6 +40,9 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     environment: artifactory-prod
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
 
     steps:
       - uses: actions/checkout@v4
@@ -59,7 +67,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: yarn
+
+      - name: Enable Corepack
+        run: |
+          corepack enable
+          echo "Yarn version: $(yarn --version)"
 
       - name: Install npm for OIDC support
         if: inputs.publish_to_public_npm == true
@@ -73,7 +85,6 @@ jobs:
           REGISTRY: ${{ secrets.REGISTRY }}
         run: |
           if [[ -n "$AUTH_TOKEN" ]]; then
-            # Default to public npm registry if REGISTRY is not provided
             EFFECTIVE_REGISTRY="${REGISTRY:-https://registry.npmjs.org}"
             yarn config set npmRegistryServer "$EFFECTIVE_REGISTRY"
             yarn config set npmAuthIdent "$AUTH_TOKEN"
@@ -89,7 +100,7 @@ jobs:
         id: check_typescript
         uses: andstor/file-existence-action@v3
         with:
-          files: "tsconfig.json"
+          files: "${{ inputs.working_directory }}/tsconfig.json"
 
       - name: Build package
         if: steps.check_typescript.outputs.files_exists == 'true'

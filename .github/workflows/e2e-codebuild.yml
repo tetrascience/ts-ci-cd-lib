@@ -1,0 +1,363 @@
+name: E2E Tests (CodeBuild)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment (e.g. predev3, dev)"
+        type: string
+        required: true
+      deploy_paths:
+        description: "Space-separated glob patterns — deploy only if changed files match. Empty string = never deploy."
+        type: string
+        required: true
+      buildspec:
+        description: "Path to the buildspec file in the caller repo"
+        type: string
+        required: true
+      deploy_workflow:
+        description: "Workflow file that builds and deploys the service (waited on after pushing to env branch)"
+        type: string
+        default: "ci.yml"
+        required: false
+      image_override:
+        description: "Override the CodeBuild base image (e.g. mcr.microsoft.com/playwright:v1.52.0-noble)"
+        type: string
+        required: false
+      compute_type_override:
+        description: "Override the CodeBuild compute type (e.g. BUILD_GENERAL1_MEDIUM for 7GB RAM)"
+        type: string
+        required: false
+      timeout_minutes:
+        description: "Max minutes for the E2E job — includes buffer for setup steps"
+        type: number
+        default: 25
+        required: false
+    secrets:
+      JFROG_ARTIFACTORY_NPM_VIRTUAL_URL:
+        required: true
+      JFROG_ARTIFACTORY_READ_NPM_AUTH:
+        required: true
+      GITHUB_PAT:
+        description: "PAT with cross-repo access and contents:write for deploy push"
+        required: true
+
+jobs:
+  check-changes:
+    if: ${{ inputs.deploy_paths != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      should_deploy: ${{ steps.check.outputs.should_deploy }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if service code changed
+        id: check
+        env:
+          DEPLOY_PATHS: ${{ inputs.deploy_paths }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+            BASE="origin/$GITHUB_BASE_REF"
+          elif [[ -n "$BEFORE_SHA" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            BASE="$BEFORE_SHA"
+          else
+            BASE="HEAD~1"
+          fi
+
+          CHANGED_FILES=$(git diff --name-only "$BASE" HEAD 2>/dev/null || echo "")
+          if [[ -z "$CHANGED_FILES" ]]; then
+            echo "No changed files detected, will deploy"
+            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          for pattern in $DEPLOY_PATHS; do
+            while IFS= read -r file; do
+              if [[ -n "$file" ]] && [[ "$file" == $pattern ]]; then
+                echo "Match: $file matches $pattern"
+                echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            done <<< "$CHANGED_FILES"
+          done
+
+          echo "No service code changes — skipping deploy"
+          echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: check-changes
+    if: ${{ needs.check-changes.outputs.should_deploy == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_PAT }}
+
+      - name: Push to environment branch
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          git push origin HEAD:refs/heads/$TARGET_ENV --force-with-lease
+          echo "Pushed $(git rev-parse HEAD) to $TARGET_ENV"
+
+      - name: Wait for deploy
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_PAT }}
+          TARGET_ENV: ${{ inputs.environment }}
+          DEPLOY_WORKFLOW: ${{ inputs.deploy_workflow }}
+        run: |
+          set -euo pipefail
+          COMMIT_SHA=$(git rev-parse HEAD)
+          echo "Waiting for $DEPLOY_WORKFLOW on $TARGET_ENV branch (commit $COMMIT_SHA)..."
+
+          for i in $(seq 1 20); do
+            sleep 15
+            RUN_ID=$(gh run list --branch "$TARGET_ENV" --workflow "$DEPLOY_WORKFLOW" --limit 20 --json databaseId,headSha,status \
+              | jq -r --arg sha "$COMMIT_SHA" '.[] | select(.headSha == $sha) | .databaseId' | head -1)
+            if [[ -n "$RUN_ID" ]]; then
+              echo "Found deploy run: $RUN_ID"
+              break
+            fi
+          done
+
+          if [[ -z "$RUN_ID" ]]; then
+            echo "::error::Deploy workflow run not found after 5 minutes"
+            exit 1
+          fi
+
+          gh run watch "$RUN_ID" --exit-status
+          echo "Deploy completed successfully"
+
+
+  e2e:
+    needs: [check-changes, deploy]
+    if: |
+      always() &&
+      (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
+      (needs.check-changes.result == 'success' || needs.check-changes.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Resolve environment
+        id: env
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+
+          # Environment → AWS account mapping.
+          # The E2E infra (CodeBuild, OIDC role, S3 bucket) is deployed as a
+          # substack of the TDP service stack via EnableE2E=true.
+          # Account IDs and regions are stable infrastructure facts.
+          declare -A ACCOUNTS=(
+            [predev]=611255221147
+            [predev2]=383434869204
+            [predev3]=866984931759
+            [predev4]=456932089055
+            [predev5]=734018046548
+            [predev6]=326392129485
+            [predev7]=901926888715
+            [predev8]=581141123528
+            [dev]=706717599419
+            [preuat]=555180171822
+          )
+
+          declare -A REGIONS=(
+            [preuat]=us-west-2
+          )
+
+          # CloudFormation Environment value used in IAM role names.
+          # All predev/dev environments use "development"; preuat uses "preuat".
+          declare -A CF_ENVIRONMENTS=(
+            [preuat]=preuat
+          )
+
+          ACCOUNT="${ACCOUNTS[$TARGET_ENV]:-}"
+          REGION="${REGIONS[$TARGET_ENV]:-us-east-2}"
+          CF_ENV="${CF_ENVIRONMENTS[$TARGET_ENV]:-development}"
+
+          if [[ -z "$ACCOUNT" ]]; then
+            echo "::error::Unknown environment: $TARGET_ENV"
+            exit 1
+          fi
+
+          echo "env=$TARGET_ENV" >> "$GITHUB_OUTPUT"
+          echo "account=$ACCOUNT" >> "$GITHUB_OUTPUT"
+          echo "region=$REGION" >> "$GITHUB_OUTPUT"
+          echo "cf_env=$CF_ENV" >> "$GITHUB_OUTPUT"
+          echo "source_bucket=tdp-e2e-source-${ACCOUNT}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          aws-region: ${{ steps.env.outputs.region }}
+          role-to-assume: arn:aws:iam::${{ steps.env.outputs.account }}:role/gha-tdp-e2e-${{ steps.env.outputs.cf_env }}
+          role-session-name: e2e-codebuild
+          role-skip-session-tagging: true
+
+      - name: Upload source to S3
+        id: source
+        env:
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          REPO_NAME: ${{ github.repository }}
+          SOURCE_BUCKET: ${{ steps.env.outputs.source_bucket }}
+        run: |
+          set -euo pipefail
+          S3_KEY="${REPO_NAME}/${COMMIT_SHA}.zip"
+          zip -r -q /tmp/source.zip . -x '.git/*'
+          aws s3 cp /tmp/source.zip "s3://${SOURCE_BUCKET}/${S3_KEY}"
+          echo "s3_location=${SOURCE_BUCKET}/${S3_KEY}" >> "$GITHUB_OUTPUT"
+
+      - name: Start CodeBuild
+        id: codebuild
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+          JFROG_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
+          JFROG_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+          S3_LOCATION: ${{ steps.source.outputs.s3_location }}
+          BUILDSPEC_PATH: ${{ inputs.buildspec }}
+          IMAGE_OVERRIDE: ${{ inputs.image_override }}
+          COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
+        run: |
+          set -euo pipefail
+
+          ENV_VARS=$(jq -nc '[
+            {"name":"E2E_ENVIRONMENT","value":env.TARGET_ENV},
+            {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
+            {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
+          ]')
+
+          CMD=(aws codebuild start-build
+            --project-name tdp-e2e
+            --source-type-override S3
+            --source-location-override "$S3_LOCATION"
+            --buildspec-override "$BUILDSPEC_PATH"
+            --environment-variables-override "$ENV_VARS")
+
+          if [[ -n "$IMAGE_OVERRIDE" ]]; then
+            CMD+=(--image-override "$IMAGE_OVERRIDE")
+          fi
+          if [[ -n "$COMPUTE_TYPE_OVERRIDE" ]]; then
+            CMD+=(--compute-type-override "$COMPUTE_TYPE_OVERRIDE")
+          fi
+
+          startBuild=$("${CMD[@]}")
+          buildId=$(echo "$startBuild" | jq -r '.build.id')
+          if [[ -z "$buildId" || "$buildId" == "null" ]]; then
+            echo "::error::Failed to start CodeBuild — no build ID returned"
+            exit 1
+          fi
+          echo "build_id=$buildId" >> "$GITHUB_OUTPUT"
+          echo "Started CodeBuild (tdp-e2e): $buildId"
+
+      - name: Wait for CodeBuild
+        id: wait
+        env:
+          BUILD_ID: ${{ steps.codebuild.outputs.build_id }}
+          TIMEOUT: ${{ inputs.timeout_minutes }}
+        run: |
+          set -euo pipefail
+          MAX_SECONDS=$((TIMEOUT * 60))
+          buildStatus="IN_PROGRESS"
+          while [[ $SECONDS -le $MAX_SECONDS ]]; do
+            sleep 15
+            buildInfo=$(aws codebuild batch-get-builds --ids "$BUILD_ID")
+            buildStatus=$(echo "$buildInfo" | jq -r '.builds[0].buildStatus')
+            if [[ -z "$buildStatus" || "$buildStatus" == "null" ]]; then
+              echo "::warning::Failed to get build status, retrying..."
+              continue
+            fi
+            if [[ "$buildStatus" != "IN_PROGRESS" ]]; then
+              break
+            fi
+          done
+
+          LOG_GROUP=$(echo "$buildInfo" | jq -r '.builds[0].logs.groupName')
+          LOG_STREAM=$(echo "$buildInfo" | jq -r '.builds[0].logs.streamName')
+          LOG_LINK=$(echo "$buildInfo" | jq -r '.builds[0].logs.deepLink')
+
+          echo "log_group=$LOG_GROUP" >> "$GITHUB_OUTPUT"
+          echo "log_stream=$LOG_STREAM" >> "$GITHUB_OUTPUT"
+          echo "log_link=$LOG_LINK" >> "$GITHUB_OUTPUT"
+          echo "build_status=$buildStatus" >> "$GITHUB_OUTPUT"
+
+          if [[ $SECONDS -gt $MAX_SECONDS ]]; then
+            echo "::error::Timeout exceeded ($TIMEOUT min); stopping CodeBuild build $BUILD_ID"
+            aws codebuild stop-build --id "$BUILD_ID" 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: Fetch CodeBuild logs
+        if: always() && steps.wait.outputs.log_stream != ''
+        env:
+          LOG_GROUP: ${{ steps.wait.outputs.log_group }}
+          LOG_STREAM: ${{ steps.wait.outputs.log_stream }}
+        run: |
+          set -euo pipefail
+          echo "::group::CodeBuild output"
+          aws logs get-log-events \
+            --log-group-name "$LOG_GROUP" \
+            --log-stream-name "$LOG_STREAM" \
+            --start-from-head \
+            --query 'events[].message' \
+            --output text 2>/dev/null || echo "(failed to fetch logs)"
+          echo "::endgroup::"
+
+      - name: Write job summary
+        if: always() && steps.wait.outputs.build_status != ''
+        env:
+          BUILD_STATUS: ${{ steps.wait.outputs.build_status }}
+          LOG_LINK: ${{ steps.wait.outputs.log_link }}
+          BUILD_ID: ${{ steps.codebuild.outputs.build_id }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          if [[ "$BUILD_STATUS" == "SUCCEEDED" ]]; then
+            ICON="white_check_mark"
+          else
+            ICON="x"
+          fi
+
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## :${ICON}: E2E Tests — ${BUILD_STATUS}
+
+          | | |
+          |---|---|
+          | **Environment** | \`${ENVIRONMENT}\` |
+          | **Build ID** | \`${BUILD_ID}\` |
+          | **Status** | ${BUILD_STATUS} |
+          | **CloudWatch Logs** | [View logs](${LOG_LINK}) |
+          EOF
+
+      - name: Check result
+        if: always()
+        env:
+          BUILD_STATUS: ${{ steps.wait.outputs.build_status }}
+          LOG_LINK: ${{ steps.wait.outputs.log_link }}
+        run: |
+          if [[ "$BUILD_STATUS" == "SUCCEEDED" ]]; then
+            echo "E2E tests passed"
+          else
+            echo "::error::E2E tests failed — status: $BUILD_STATUS"
+            echo "::error::CloudWatch logs: $LOG_LINK"
+            exit 1
+          fi
