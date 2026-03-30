@@ -42,14 +42,12 @@ on:
         description: "PAT with cross-repo access and contents:write for deploy push"
         required: true
 
-permissions:
-  id-token: write
-  contents: read
-
 jobs:
   check-changes:
     if: ${{ inputs.deploy_paths != '' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       should_deploy: ${{ steps.check.outputs.should_deploy }}
     steps:
@@ -100,6 +98,8 @@ jobs:
     if: ${{ needs.check-changes.outputs.should_deploy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -151,6 +151,9 @@ jobs:
       (needs.check-changes.result == 'success' || needs.check-changes.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      id-token: write
+      contents: read
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
