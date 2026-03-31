@@ -82,7 +82,7 @@ jobs:
 
           for pattern in $DEPLOY_PATHS; do
             while IFS= read -r file; do
-              # Use case for glob matching — portable and handles ** correctly
+              # Use case for glob-style matching of changed files, including ** patterns
               case "$file" in
                 $pattern)
                   echo "Match: $file matches $pattern"
