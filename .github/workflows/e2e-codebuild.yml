@@ -82,11 +82,14 @@ jobs:
 
           for pattern in $DEPLOY_PATHS; do
             while IFS= read -r file; do
-              if [[ -n "$file" ]] && [[ "$file" == $pattern ]]; then
-                echo "Match: $file matches $pattern"
-                echo "should_deploy=true" >> "$GITHUB_OUTPUT"
-                exit 0
-              fi
+              # Use case for glob matching — portable and handles ** correctly
+              case "$file" in
+                $pattern)
+                  echo "Match: $file matches $pattern"
+                  echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+                  exit 0
+                  ;;
+              esac
             done <<< "$CHANGED_FILES"
           done
 
