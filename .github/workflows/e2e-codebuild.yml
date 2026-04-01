@@ -61,7 +61,7 @@ jobs:
           DEPLOY_PATHS: ${{ inputs.deploy_paths }}
           BEFORE_SHA: ${{ github.event.before }}
         run: |
-          set -euo pipefail
+          set -euo pipefail -f  # -f disables glob expansion so src/** stays literal
           if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
             BASE="origin/$GITHUB_BASE_REF"
           elif [[ -n "$BEFORE_SHA" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
