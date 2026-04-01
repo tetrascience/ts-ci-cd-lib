@@ -28,6 +28,10 @@ on:
         description: "Override the CodeBuild compute type (e.g. BUILD_GENERAL1_MEDIUM for 7GB RAM)"
         type: string
         required: false
+      existing_deploy_branch:
+        description: "When set, skip the deploy push and instead wait for an existing deploy_workflow run on this branch. Use when CI already deploys on merge (e.g. push to development)."
+        type: string
+        required: false
       timeout_minutes:
         description: "Max minutes for the E2E job — includes buffer for setup steps"
         type: number
@@ -113,6 +117,7 @@ jobs:
           token: ${{ secrets.GITHUB_PAT }}
 
       - name: Push to environment branch
+        if: ${{ inputs.existing_deploy_branch == '' }}
         env:
           TARGET_ENV: ${{ inputs.environment }}
         run: |
@@ -132,16 +137,16 @@ jobs:
       - name: Wait for deploy
         env:
           GH_TOKEN: ${{ secrets.GITHUB_PAT }}
-          TARGET_ENV: ${{ inputs.environment }}
+          DEPLOY_BRANCH: ${{ inputs.existing_deploy_branch || inputs.environment }}
           DEPLOY_WORKFLOW: ${{ inputs.deploy_workflow }}
         run: |
           set -euo pipefail
           COMMIT_SHA=$(git rev-parse HEAD)
-          echo "Waiting for $DEPLOY_WORKFLOW on $TARGET_ENV branch (commit $COMMIT_SHA)..."
+          echo "Waiting for $DEPLOY_WORKFLOW on $DEPLOY_BRANCH branch (commit $COMMIT_SHA)..."
 
-          for i in $(seq 1 20); do
+          for i in $(seq 1 40); do
             sleep 15
-            RUN_ID=$(gh run list --branch "$TARGET_ENV" --workflow "$DEPLOY_WORKFLOW" --limit 20 --json databaseId,headSha,status \
+            RUN_ID=$(gh run list --branch "$DEPLOY_BRANCH" --workflow "$DEPLOY_WORKFLOW" --limit 20 --json databaseId,headSha,status \
               | jq -r --arg sha "$COMMIT_SHA" '.[] | select(.headSha == $sha) | .databaseId' | head -1)
             if [[ -n "$RUN_ID" ]]; then
               echo "Found deploy run: $RUN_ID"
@@ -150,7 +155,7 @@ jobs:
           done
 
           if [[ -z "$RUN_ID" ]]; then
-            echo "::error::Deploy workflow run not found after 5 minutes"
+            echo "::error::Deploy workflow run not found after 10 minutes"
             exit 1
           fi
 
