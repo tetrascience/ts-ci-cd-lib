@@ -37,6 +37,20 @@ runs:
         overwrite: true
 
     # --- PR reporting + enforcement (only on pull requests) ---
+    - name: Install jq (if not present)
+      if: github.event_name == 'pull_request'
+      shell: bash
+      run: |
+        if command -v jq &> /dev/null; then
+          echo "jq already installed: $(jq --version)"
+        else
+          echo "Installing jq..."
+          ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
+          curl -sL -o /usr/local/bin/jq "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-${ARCH}"
+          chmod +x /usr/local/bin/jq
+          echo "Installed: $(jq --version)"
+        fi
+
     - name: Resolve caller workflow
       if: github.event_name == 'pull_request'
       id: resolve-workflow
@@ -67,10 +81,12 @@ runs:
         GH_TOKEN: ${{ github.token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
-        COMMENT_ID=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-          --jq '.[] | select(.body | contains("vitest-coverage-report-marker")) | .id' | head -1)
+        COMMENT_ID=$(curl -s -H "Authorization: token ${GH_TOKEN}" \
+          "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+          | jq -r '.[] | select(.body | contains("vitest-coverage-report-marker")) | .id' | head -1)
         if [ -n "$COMMENT_ID" ]; then
-          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}"
+          curl -s -X DELETE -H "Authorization: token ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}"
           echo "Deleted previous coverage comment ($COMMENT_ID)"
         fi
 
@@ -127,7 +143,17 @@ runs:
             exit 1
           fi
 
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename' \
+          # Fetch changed files via curl with pagination (avoids gh CLI dependency)
+          CHANGED_FILES=""
+          URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100"
+          while [ -n "$URL" ]; do
+            RESP=$(curl -s -D /tmp/coverage-headers -H "Authorization: token ${GH_TOKEN}" "$URL")
+            CHANGED_FILES+=$(echo "$RESP" | jq -r '.[] | select(.status != "removed") | .filename')$'\n'
+            URL=$(sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' /tmp/coverage-headers)
+          done
+          rm -f /tmp/coverage-headers
+
+          echo "$CHANGED_FILES" \
             | grep -E "$SOURCE_FILE_PATTERN" \
             | grep -vE "$SOURCE_FILE_EXCLUDE" \
             | grep -vE '/index\.(ts|tsx)$' \
@@ -143,12 +169,12 @@ runs:
               ' "${COVERAGE_PATH}coverage-final.json" 2>/dev/null)
 
               if [ -z "$PCT" ] || [ "$PCT" = "null" ]; then
-                echo "::error file=$file::No coverage data found (treated as 0%)"
+                echo "::error file=$file::New/changed file has no coverage data (treated as 0%). Add tests covering the new lines in this file."
                 echo "FAILED" >> /tmp/coverage-check-failed
               else
                 FLOORED=$(echo "$PCT" | awk '{printf "%d", $1}')
                 if [ "$FLOORED" -lt "$THRESHOLD" ]; then
-                  echo "::error file=$file::Coverage is ${FLOORED}% (required: ${THRESHOLD}%)"
+                  echo "::error file=$file::New/changed code coverage is ${FLOORED}% (required: ${THRESHOLD}%). Add tests to cover the new lines in this file."
                   echo "FAILED" >> /tmp/coverage-check-failed
                 fi
               fi
