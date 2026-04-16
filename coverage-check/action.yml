@@ -143,12 +143,12 @@ runs:
               ' "${COVERAGE_PATH}coverage-final.json" 2>/dev/null)
 
               if [ -z "$PCT" ] || [ "$PCT" = "null" ]; then
-                echo "::error file=$file::No coverage data found (treated as 0%)"
+                echo "::error file=$file::New/changed file has no coverage data (treated as 0%). Add tests covering the new lines in this file."
                 echo "FAILED" >> /tmp/coverage-check-failed
               else
                 FLOORED=$(echo "$PCT" | awk '{printf "%d", $1}')
                 if [ "$FLOORED" -lt "$THRESHOLD" ]; then
-                  echo "::error file=$file::Coverage is ${FLOORED}% (required: ${THRESHOLD}%)"
+                  echo "::error file=$file::New/changed code coverage is ${FLOORED}% (required: ${THRESHOLD}%). Add tests to cover the new lines in this file."
                   echo "FAILED" >> /tmp/coverage-check-failed
                 fi
               fi
