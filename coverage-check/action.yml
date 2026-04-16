@@ -37,22 +37,6 @@ runs:
         overwrite: true
 
     # --- PR reporting + enforcement (only on pull requests) ---
-    - name: Install GitHub CLI (if not present)
-      if: github.event_name == 'pull_request'
-      shell: bash
-      run: |
-        if command -v gh &> /dev/null; then
-          echo "gh already installed: $(gh --version | head -1)"
-        else
-          echo "Installing GitHub CLI..."
-          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-            | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-            | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-          sudo apt-get update -qq && sudo apt-get install -y -qq gh
-          echo "Installed: $(gh --version | head -1)"
-        fi
-
     - name: Resolve caller workflow
       if: github.event_name == 'pull_request'
       id: resolve-workflow
@@ -83,10 +67,12 @@ runs:
         GH_TOKEN: ${{ github.token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
-        COMMENT_ID=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-          --jq '.[] | select(.body | contains("vitest-coverage-report-marker")) | .id' | head -1)
+        COMMENT_ID=$(curl -s -H "Authorization: token ${GH_TOKEN}" \
+          "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+          | jq -r '.[] | select(.body | contains("vitest-coverage-report-marker")) | .id' | head -1)
         if [ -n "$COMMENT_ID" ]; then
-          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}"
+          curl -s -X DELETE -H "Authorization: token ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}"
           echo "Deleted previous coverage comment ($COMMENT_ID)"
         fi
 
@@ -143,7 +129,17 @@ runs:
             exit 1
           fi
 
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[] | select(.status != "removed") | .filename' \
+          # Fetch changed files via curl with pagination (avoids gh CLI dependency)
+          CHANGED_FILES=""
+          URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100"
+          while [ -n "$URL" ]; do
+            RESP=$(curl -s -D /tmp/coverage-headers -H "Authorization: token ${GH_TOKEN}" "$URL")
+            CHANGED_FILES+=$(echo "$RESP" | jq -r '.[] | select(.status != "removed") | .filename')$'\n'
+            URL=$(sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' /tmp/coverage-headers)
+          done
+          rm -f /tmp/coverage-headers
+
+          echo "$CHANGED_FILES" \
             | grep -E "$SOURCE_FILE_PATTERN" \
             | grep -vE "$SOURCE_FILE_EXCLUDE" \
             | grep -vE '/index\.(ts|tsx)$' \
