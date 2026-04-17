@@ -157,7 +157,7 @@ jobs:
           if [[ "$NORMALIZED_REGISTRY" == "https://registry.npmjs.org" ]]; then
             PACKAGE_NAME=$(node -p "require('./package.json').name")
             if [[ $PACKAGE_NAME == @tetrascience/* ]]; then
-              NEW_PACKAGE_NAME=$(echo $PACKAGE_NAME | sed 's/@tetrascience\//@tetrascience-npm\//')
+              NEW_PACKAGE_NAME=$(echo "$PACKAGE_NAME" | sed 's/@tetrascience\//@tetrascience-npm\//')
               echo "Updating package name from $PACKAGE_NAME to $NEW_PACKAGE_NAME"
               npm pkg set name="$NEW_PACKAGE_NAME"
             else
