@@ -28,6 +28,11 @@ on:
         type: boolean
         default: false
         required: false
+      pre_install_command:
+        description: "Shell command to run after checkout + auth but before install. Runs at the REPO ROOT (not working_directory). Use for codegen that produces the working_directory contents (e.g., OpenAPI client generation)."
+        type: string
+        default: ""
+        required: false
     secrets:
       AUTH_TOKEN:
         required: false
@@ -92,6 +97,11 @@ jobs:
           else
             echo "No AUTH_TOKEN provided, skipping JFrog Artifactory configuration"
           fi
+
+      - name: Pre-install setup
+        if: inputs.pre_install_command != ''
+        working-directory: "."
+        run: ${{ inputs.pre_install_command }}
 
       - name: Install dependencies
         run: yarn install --immutable

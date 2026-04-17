@@ -45,6 +45,7 @@ jobs:
 | `prerelease_tag` | Prerelease tag for version suffix and npm dist-tag (e.g., alpha, beta). Leave empty for non-prerelease versions. | No | `""` |
 | `run_tests` | Whether to run tests before publishing | No | `true` |
 | `publish_to_public_npm` | Set to true to confirm publishing to public npm registry | No | `false` |
+| `pre_install_command` | Shell command to run after checkout + auth but before install. Runs at repo root (not `working_directory`). Use for codegen that produces the `working_directory` contents. | No | `""` |
 
 #### Secrets
 
