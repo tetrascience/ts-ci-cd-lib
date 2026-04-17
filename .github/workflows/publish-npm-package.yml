@@ -131,8 +131,8 @@ jobs:
         run: |
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          echo "PACKAGE_VERSION=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
-          echo "TAG_VERSION=$TAG_VERSION" >> $GITHUB_OUTPUT
+          echo "PACKAGE_VERSION=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "TAG_VERSION=$TAG_VERSION" >> "$GITHUB_OUTPUT"
           if [[ "$PACKAGE_VERSION" != "$TAG_VERSION" ]]; then
             echo "ERROR: Git tag (v$TAG_VERSION) does not match package.json version ($PACKAGE_VERSION)"
             exit 1
