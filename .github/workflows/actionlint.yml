@@ -22,7 +22,7 @@ jobs:
         shell: bash
         env:
           ACTIONLINT_VERSION: ${{ inputs.version }}
-        run: bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) "$ACTIONLINT_VERSION"
+        run: bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) "$ACTIONLINT_VERSION"
 
       - name: Run actionlint
         run: ./actionlint -color
