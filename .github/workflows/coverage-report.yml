@@ -1,0 +1,80 @@
+name: Coverage Report
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: Node.js version
+        type: string
+        default: "20"
+        required: false
+      coverage_script:
+        description: "Script to run (must produce coverage/ with json + json-summary reporters)"
+        type: string
+        default: "test:coverage"
+        required: false
+      new_code_threshold:
+        description: "Minimum statement coverage % for changed source files (0 to disable)"
+        type: number
+        default: 95
+        required: false
+      source_file_pattern:
+        description: "Grep regex for source files to enforce new-code threshold on"
+        type: string
+        default: '^src/.*\.(ts|tsx)$'
+        required: false
+      source_file_exclude:
+        description: "Grep regex for files to exclude from new-code threshold"
+        type: string
+        default: '\.(test|spec|stories)\.(ts|tsx)$'
+        required: false
+    secrets:
+      AUTH_TOKEN:
+        required: false
+      REGISTRY:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Configure registry auth
+        env:
+          AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
+          REGISTRY: ${{ secrets.REGISTRY }}
+        run: |
+          if [[ -n "$AUTH_TOKEN" ]]; then
+            EFFECTIVE_REGISTRY="${REGISTRY:-https://registry.npmjs.org}"
+            yarn config set npmRegistryServer "$EFFECTIVE_REGISTRY"
+            yarn config set npmAuthIdent "$AUTH_TOKEN"
+            yarn config set npmAlwaysAuth true
+          fi
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Run tests with coverage
+        env:
+          COVERAGE_SCRIPT: ${{ inputs.coverage_script }}
+        run: yarn run "$COVERAGE_SCRIPT"
+
+      - name: Coverage check
+        uses: tetrascience/ts-ci-cd-lib/coverage-check@main
+        with:
+          new-code-threshold: ${{ inputs.new_code_threshold }}
+          source-file-pattern: ${{ inputs.source_file_pattern }}
+          source-file-exclude: ${{ inputs.source_file_exclude }}
