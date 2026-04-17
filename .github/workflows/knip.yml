@@ -59,10 +59,12 @@ jobs:
       - name: Run knip
         env:
           KNIP_ARGS: ${{ inputs.args }}
+        shell: bash
         run: |
-          CMD="npx knip"
+          # Build args array safely — no eval
+          ARGS=()
           if [[ -n "$KNIP_ARGS" ]]; then
-            CMD="$CMD $KNIP_ARGS"
+            read -ra ARGS <<< "$KNIP_ARGS"
           fi
-          echo "Running: $CMD"
-          eval "$CMD"
+          echo "Running: npx knip ${ARGS[*]}"
+          npx knip "${ARGS[@]}"
