@@ -5,12 +5,33 @@ Reusable CI/CD workflows for TetraScience repositories.
 ## Table of Contents <!-- omit in toc -->
 
 - [Workflows](#workflows)
+  - [actionlint](#actionlint)
   - [knip](#knip)
   - [publish-npm-package](#publish-npm-package)
   - [check-links](#check-links)
   - [e2e-codebuild](#e2e-codebuild)
 
 ## Workflows
+
+### actionlint
+
+Reusable workflow that runs [actionlint](https://github.com/rhysd/actionlint) to lint all GitHub Actions workflow files in the repo. Catches syntax errors, type mismatches, deprecated features, and security issues in workflow YAML.
+
+#### Usage
+
+```yaml
+jobs:
+  actionlint:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/actionlint.yml@main
+```
+
+#### Inputs
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `version` | actionlint version to install | No | `"latest"` |
+
+---
 
 ### knip
 

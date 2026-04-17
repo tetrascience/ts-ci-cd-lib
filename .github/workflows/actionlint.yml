@@ -1,0 +1,30 @@
+name: Actionlint — GitHub Actions workflow linter
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "actionlint version to install (default: latest)"
+        type: string
+        default: "latest"
+        required: false
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install actionlint
+        shell: bash
+        env:
+          ACTIONLINT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$ACTIONLINT_VERSION" == "latest" ]]; then
+            bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          else
+            bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) "$ACTIONLINT_VERSION"
+          fi
+
+      - name: Run actionlint
+        run: ./actionlint -color
