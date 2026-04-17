@@ -1,58 +1,63 @@
 # ts-ci-cd-lib <!-- omit in toc -->
 
-Reusable CI/CD workflows and actions for TetraScience repositories.
+Reusable CI/CD workflows for TetraScience repositories.
 
 ## Table of Contents <!-- omit in toc -->
 
-- [Actions](#actions)
-  - [knip-check](#knip-check)
 - [Workflows](#workflows)
+  - [knip](#knip)
   - [publish-npm-package](#publish-npm-package)
   - [check-links](#check-links)
   - [e2e-codebuild](#e2e-codebuild)
 
-## Actions
+## Workflows
 
-### knip-check
+### knip
 
-Composite action that runs [knip](https://knip.dev/) to detect unused dependencies, exports, types, and files. Add as a single step in your existing CI workflow.
+Reusable workflow that runs [knip](https://knip.dev/) to detect unused dependencies, exports, types, and files. Handles checkout, Node setup, Corepack, registry auth, install, and caching — callers just wire it up.
 
-#### CI usage
+#### Usage
 
 ```yaml
-steps:
-  - uses: actions/checkout@v4
-  - uses: actions/setup-node@v4
-  - run: yarn install --immutable
-  - uses: tetrascience/ts-ci-cd-lib/knip-check@main
+jobs:
+  knip:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/knip.yml@main
+    secrets:
+      AUTH_TOKEN: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+      REGISTRY: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
 ```
 
 #### With options
 
 ```yaml
-  - uses: tetrascience/ts-ci-cd-lib/knip-check@main
+  knip:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/knip.yml@main
     with:
-      working-directory: packages/my-lib
+      working_directory: packages/my-lib
       args: "--include dependencies"
+    secrets:
+      AUTH_TOKEN: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+      REGISTRY: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
 ```
 
 #### Inputs
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `working-directory` | Directory to run knip in | No | `"."` |
-| `config` | Path to knip config file | No | auto-detected |
+| `node_version` | Node.js version | No | `"20"` |
+| `working_directory` | Directory to run knip in | No | `"."` |
 | `args` | Additional arguments passed to knip | No | `""` |
+
+#### Secrets
+
+| Secret | Description | Required |
+|--------|-------------|----------|
+| `AUTH_TOKEN` | JFrog npm auth token (for installing private deps) | No |
+| `REGISTRY` | JFrog virtual registry URL | No |
 
 #### Husky pre-commit
 
-Same tool, no action needed — add directly to `.husky/pre-commit`:
-
-```sh
-npx knip
-```
-
-Or for faster pre-commit (check only dependencies):
+Same tool, no workflow needed — add directly to `.husky/pre-commit`:
 
 ```sh
 npx knip --include dependencies
@@ -70,8 +75,6 @@ For most repos, knip works out of the box. If you need to ignore specific patter
 ```
 
 ---
-
-## Workflows
 
 ### publish-npm-package
 

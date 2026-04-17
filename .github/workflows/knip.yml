@@ -1,0 +1,68 @@
+name: Knip — unused dependencies & exports check
+
+on:
+  workflow_call:
+    inputs:
+      node_version:
+        description: Node.js version
+        type: string
+        default: "20"
+        required: false
+      working_directory:
+        description: "Directory to run knip in (default: repo root)"
+        type: string
+        default: "."
+        required: false
+      args:
+        description: "Additional arguments passed to knip (e.g., --include dependencies)"
+        type: string
+        default: ""
+        required: false
+    secrets:
+      AUTH_TOKEN:
+        required: false
+      REGISTRY:
+        required: false
+
+jobs:
+  knip:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Configure registry auth
+        env:
+          AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
+          REGISTRY: ${{ secrets.REGISTRY }}
+        run: |
+          if [[ -n "$AUTH_TOKEN" ]]; then
+            EFFECTIVE_REGISTRY="${REGISTRY:-https://registry.npmjs.org}"
+            yarn config set npmRegistryServer "$EFFECTIVE_REGISTRY"
+            yarn config set npmAuthIdent "$AUTH_TOKEN"
+            yarn config set npmAlwaysAuth true
+          fi
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Run knip
+        env:
+          KNIP_ARGS: ${{ inputs.args }}
+        run: |
+          CMD="npx knip"
+          if [[ -n "$KNIP_ARGS" ]]; then
+            CMD="$CMD $KNIP_ARGS"
+          fi
+          echo "Running: $CMD"
+          eval "$CMD"
