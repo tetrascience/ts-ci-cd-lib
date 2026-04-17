@@ -9,6 +9,9 @@ on:
         default: "latest"
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   actionlint:
     runs-on: ubuntu-latest

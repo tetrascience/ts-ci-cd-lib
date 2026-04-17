@@ -24,6 +24,9 @@ on:
       REGISTRY:
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   knip:
     runs-on: ubuntu-latest
