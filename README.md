@@ -1,13 +1,75 @@
 # ts-ci-cd-lib <!-- omit in toc -->
 
-Reusable CI/CD workflows for TetraScience repositories.
+Reusable CI/CD workflows and actions for TetraScience repositories.
 
 ## Table of Contents <!-- omit in toc -->
 
+- [Actions](#actions)
+  - [knip-check](#knip-check)
 - [Workflows](#workflows)
   - [publish-npm-package](#publish-npm-package)
   - [check-links](#check-links)
   - [e2e-codebuild](#e2e-codebuild)
+
+## Actions
+
+### knip-check
+
+Composite action that runs [knip](https://knip.dev/) to detect unused dependencies, exports, types, and files. Add as a single step in your existing CI workflow.
+
+#### CI usage
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - uses: actions/setup-node@v4
+  - run: yarn install --immutable
+  - uses: tetrascience/ts-ci-cd-lib/knip-check@main
+```
+
+#### With options
+
+```yaml
+  - uses: tetrascience/ts-ci-cd-lib/knip-check@main
+    with:
+      working-directory: packages/my-lib
+      args: "--include dependencies"
+```
+
+#### Inputs
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `working-directory` | Directory to run knip in | No | `"."` |
+| `config` | Path to knip config file | No | auto-detected |
+| `args` | Additional arguments passed to knip | No | `""` |
+
+#### Husky pre-commit
+
+Same tool, no action needed — add directly to `.husky/pre-commit`:
+
+```sh
+npx knip
+```
+
+Or for faster pre-commit (check only dependencies):
+
+```sh
+npx knip --include dependencies
+```
+
+#### Knip config
+
+For most repos, knip works out of the box. If you need to ignore specific patterns, create `knip.json`:
+
+```json
+{
+  "ignore": ["src/generated/**"],
+  "ignoreDependencies": ["@types/*"]
+}
+```
+
+---
 
 ## Workflows
 
