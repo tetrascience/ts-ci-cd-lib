@@ -1,4 +1,9 @@
-name: Actionlint — GitHub Actions workflow linter
+name: Workflow linting — actionlint + zizmor
+
+# NOTE: filename is kept as actionlint.yml for backwards compatibility with
+# existing callers. Content now runs both actionlint (syntax/best-practice
+# lint) and zizmor (security audit — pwn-requests, template injection,
+# untrusted checkouts, permissions, etc.).
 
 on:
   workflow_call:
@@ -7,6 +12,11 @@ on:
         description: "actionlint version to install"
         type: string
         default: "1.7.12"
+        required: false
+      zizmor_version:
+        description: "zizmor version to install"
+        type: string
+        default: "1.4.1"
         required: false
 
 permissions:
@@ -27,3 +37,17 @@ jobs:
 
       - name: Run actionlint
         run: ./actionlint -color
+
+      - name: Install zizmor
+        shell: bash
+        env:
+          ZIZMOR_VERSION: ${{ inputs.zizmor_version }}
+        run: pipx install "zizmor==${ZIZMOR_VERSION}"
+
+      - name: Run zizmor
+        shell: bash
+        env:
+          # Token enables online audits (stale action refs, known-vulnerable
+          # action versions). Audits that don't need API access still run without it.
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --format plain .
