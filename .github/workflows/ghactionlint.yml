@@ -1,14 +1,14 @@
-name: Workflow linting — actionlint + zizmor
+name: ghactionlint — actionlint + zizmor
 
-# NOTE: filename is kept as actionlint.yml for backwards compatibility with
-# existing callers. Content now runs both actionlint (syntax/best-practice
-# lint) and zizmor (security audit — pwn-requests, template injection,
-# untrusted checkouts, permissions, etc.).
+# Runs two complementary linters over the caller's .github/workflows/:
+#   - actionlint: syntax, best-practice, and shellcheck lint
+#   - zizmor:     security audit (pwn-requests, template injection,
+#                 untrusted checkouts, permissions, stale action refs)
 
 on:
   workflow_call:
     inputs:
-      version:
+      actionlint_version:
         description: "actionlint version to install"
         type: string
         default: "1.7.12"
@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 jobs:
-  actionlint:
+  ghactionlint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +31,7 @@ jobs:
       - name: Install actionlint
         shell: bash
         env:
-          ACTIONLINT_VERSION: ${{ inputs.version }}
+          ACTIONLINT_VERSION: ${{ inputs.actionlint_version }}
         # Pinned to v1.7.12 commit SHA — tags can be force-pushed
         run: bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash) "$ACTIONLINT_VERSION"
 
@@ -48,6 +48,6 @@ jobs:
         shell: bash
         env:
           # Token enables online audits (stale action refs, known-vulnerable
-          # action versions). Audits that don't need API access still run without it.
+          # versions). Offline audits still run without it.
           GH_TOKEN: ${{ github.token }}
         run: zizmor --format plain .

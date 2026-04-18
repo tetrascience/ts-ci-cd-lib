@@ -10,5 +10,5 @@ permissions:
   contents: read
 
 jobs:
-  actionlint:
-    uses: ./.github/workflows/actionlint.yml
+  ghactionlint:
+    uses: ./.github/workflows/ghactionlint.yml
