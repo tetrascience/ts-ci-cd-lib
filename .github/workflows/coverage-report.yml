@@ -73,7 +73,8 @@ jobs:
         run: yarn run "$COVERAGE_SCRIPT"
 
       - name: Coverage check
-        uses: tetrascience/ts-ci-cd-lib/coverage-check@main
+        # TODO: update to @main after this branch merges
+        uses: tetrascience/ts-ci-cd-lib/coverage-check@feat/knip-check
         with:
           new-code-threshold: ${{ inputs.new_code_threshold }}
           source-file-pattern: ${{ inputs.source_file_pattern }}
