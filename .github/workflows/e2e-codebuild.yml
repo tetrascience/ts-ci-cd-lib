@@ -114,8 +114,7 @@ jobs:
       contents: read
     steps:
       # Credentials persist intentionally — the next step pushes to the env branch
-      # zizmor: ignore[artipacked]
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # zizmor: ignore[artipacked]
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_PAT }}
