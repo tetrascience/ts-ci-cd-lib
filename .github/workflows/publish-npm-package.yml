@@ -33,6 +33,11 @@ on:
         type: string
         default: ""
         required: false
+      environment:
+        description: "GitHub environment for deployment protection. Leave empty to skip environment gating (use when the calling repo has no artifactory-prod environment configured)."
+        type: string
+        default: "artifactory-prod"
+        required: false
     secrets:
       AUTH_TOKEN:
         required: false
@@ -44,7 +49,7 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    environment: artifactory-prod
+    environment: ${{ inputs.environment != '' && inputs.environment || null }}
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
