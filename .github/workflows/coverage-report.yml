@@ -74,19 +74,9 @@ jobs:
           COVERAGE_SCRIPT: ${{ inputs.coverage_script }}
         run: yarn run "$COVERAGE_SCRIPT"
 
-      # Checkout this repo at the same SHA the reusable workflow itself
-      # is running from, so the coverage-check composite action stays
-      # version-locked to the reusable workflow that calls it (and avoids
-      # the unpinned-tag CodeQL alert on a same-repo @ref).
-      - uses: actions/checkout@v4
-        with:
-          repository: tetrascience/ts-ci-cd-lib
-          ref: ${{ github.workflow_sha }}
-          path: _ts-ci-cd-lib
-          persist-credentials: false
-
       - name: Coverage check
-        uses: ./_ts-ci-cd-lib/coverage-check
+        # TODO: update to @main after this branch merges
+        uses: tetrascience/ts-ci-cd-lib/coverage-check@feat/knip-check
         with:
           new-code-threshold: ${{ inputs.new_code_threshold }}
           source-file-pattern: ${{ inputs.source_file_pattern }}
