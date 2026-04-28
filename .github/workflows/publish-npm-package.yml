@@ -33,6 +33,11 @@ on:
         type: string
         default: ""
         required: false
+      dry_run:
+        description: "Simulate publish without pushing to any registry"
+        type: boolean
+        default: false
+        required: false
     secrets:
       AUTH_TOKEN:
         required: false
@@ -189,6 +194,11 @@ jobs:
           PUBLISH_REGISTRY: ${{ secrets.PUBLISH_REGISTRY }}
           REPO_VISIBILITY: ${{ github.event.repository.visibility }}
         run: |
+          DRY_RUN_FLAG=""
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            DRY_RUN_FLAG="--dry-run"
+            echo "::notice::DRY RUN — package will NOT be published"
+          fi
           NORMALIZED_REGISTRY=$(echo "$PUBLISH_REGISTRY" | sed 's:/*$::' | tr '[:upper:]' '[:lower:]')
           if [[ "$NORMALIZED_REGISTRY" == "https://registry.npmjs.org" ]]; then
             PROVENANCE_FLAG=""
@@ -197,9 +207,9 @@ jobs:
             else
               echo "Skipping --provenance (repo visibility: $REPO_VISIBILITY, provenance requires public repos)"
             fi
-            npm publish $PROVENANCE_FLAG --access public
+            npm publish $PROVENANCE_FLAG --access public $DRY_RUN_FLAG
           else
-            yarn npm publish
+            yarn npm publish $DRY_RUN_FLAG
           fi
 
       # Prerelease: Publish with dist-tag
@@ -210,6 +220,11 @@ jobs:
           PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
           REPO_VISIBILITY: ${{ github.event.repository.visibility }}
         run: |
+          DRY_RUN_FLAG=""
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            DRY_RUN_FLAG="--dry-run"
+            echo "::notice::DRY RUN — package will NOT be published"
+          fi
           NORMALIZED_REGISTRY=$(echo "$PUBLISH_REGISTRY" | sed 's:/*$::' | tr '[:upper:]' '[:lower:]')
           if [[ "$NORMALIZED_REGISTRY" == "https://registry.npmjs.org" ]]; then
             PROVENANCE_FLAG=""
@@ -218,7 +233,7 @@ jobs:
             else
               echo "Skipping --provenance (repo visibility: $REPO_VISIBILITY, provenance requires public repos)"
             fi
-            npm publish $PROVENANCE_FLAG --tag "$PRERELEASE_TAG" --access public
+            npm publish $PROVENANCE_FLAG --tag "$PRERELEASE_TAG" --access public $DRY_RUN_FLAG
           else
-            yarn npm publish --tag "$PRERELEASE_TAG"
+            yarn npm publish --tag "$PRERELEASE_TAG" $DRY_RUN_FLAG
           fi
