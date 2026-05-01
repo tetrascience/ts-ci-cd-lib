@@ -8,6 +8,11 @@ on:
         type: string
         default: "20"
         required: false
+      knip_version:
+        description: Knip version to run
+        type: string
+        default: "6.10.0"
+        required: false
       working_directory:
         description: "Directory to run knip in (default: repo root)"
         type: string
@@ -29,17 +34,18 @@ permissions:
 
 jobs:
   knip:
+    name: Knip
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ inputs.node_version }}
 
@@ -64,6 +70,7 @@ jobs:
       - name: Run knip
         env:
           KNIP_ARGS: ${{ inputs.args }}
+          KNIP_VERSION: ${{ inputs.knip_version }}
         shell: bash
         run: |
           # Build args array safely — no eval
@@ -71,5 +78,5 @@ jobs:
           if [[ -n "$KNIP_ARGS" ]]; then
             read -ra ARGS <<< "$KNIP_ARGS"
           fi
-          echo "Running: npx knip ${ARGS[*]}"
-          npx knip "${ARGS[@]}"
+          echo "Running: npx --yes knip@$KNIP_VERSION ${ARGS[*]}"
+          npx --yes "knip@$KNIP_VERSION" "${ARGS[@]}"

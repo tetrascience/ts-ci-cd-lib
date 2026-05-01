@@ -29,7 +29,7 @@ on:
         default: false
         required: false
       pre_install_command:
-        description: "Shell command to run after checkout + auth but before install. Runs at the REPO ROOT (not working_directory). Use for codegen that produces the working_directory contents (e.g., OpenAPI client generation)."
+        description: "Shell command to run after checkout but before registry auth + install. Runs at the REPO ROOT (not working_directory). Use for codegen that produces the working_directory contents (e.g., OpenAPI client generation)."
         type: string
         default: ""
         required: false
@@ -41,16 +41,24 @@ on:
       PUBLISH_REGISTRY:
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   publish:
+    name: Publish npm package
     runs-on: ubuntu-latest
     environment: artifactory-prod
+    permissions:
+      contents: read
+      # Required for npm OIDC trusted publishing when publish_to_public_npm is true.
+      id-token: write
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
 
@@ -71,7 +79,7 @@ jobs:
             echo "Caller workflow must have 'permissions: id-token: write' for OIDC to work"
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ inputs.node_version }}
 
@@ -83,8 +91,17 @@ jobs:
       - name: Install npm for OIDC support
         if: inputs.publish_to_public_npm == true
         run: |
-          npm install -g npm@latest
+          npm install -g npm@11.13.0
           echo "Installed npm version: $(npm --version)"
+
+      - name: Pre-install setup
+        if: inputs.pre_install_command != ''
+        shell: bash
+        working-directory: "."
+        env:
+          PRE_INSTALL_CMD: ${{ inputs.pre_install_command }}
+        run: |
+          bash -euo pipefail -c "$PRE_INSTALL_CMD"
 
       - name: Configure JFrog Artifactory
         env:
@@ -100,23 +117,21 @@ jobs:
             echo "No AUTH_TOKEN provided, skipping JFrog Artifactory configuration"
           fi
 
-      - name: Pre-install setup
-        if: inputs.pre_install_command != ''
-        shell: bash
-        working-directory: "."
-        env:
-          PRE_INSTALL_CMD: ${{ inputs.pre_install_command }}
-        run: |
-          eval "$PRE_INSTALL_CMD"
-
       - name: Install dependencies
         run: yarn install --immutable
 
       - name: Check if Typescript
         id: check_typescript
-        uses: andstor/file-existence-action@v3
-        with:
-          files: "${{ inputs.working_directory }}/tsconfig.json"
+        shell: bash
+        working-directory: "."
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working_directory }}
+        run: |
+          if [[ -f "$WORKING_DIRECTORY/tsconfig.json" ]]; then
+            echo "files_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "files_exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build package
         if: steps.check_typescript.outputs.files_exists == 'true'

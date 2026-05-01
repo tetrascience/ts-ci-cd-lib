@@ -9,8 +9,12 @@ on:
         default: "--cache --max-cache-age 1d ."
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   check-links:
+    name: Check links
     runs-on: ubuntu-latest
 
     steps:
