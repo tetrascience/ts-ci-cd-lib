@@ -5,11 +5,97 @@ Reusable CI/CD workflows for TetraScience repositories.
 ## Table of Contents <!-- omit in toc -->
 
 - [Workflows](#workflows)
+  - [actionlint](#actionlint)
+  - [knip](#knip)
   - [publish-npm-package](#publish-npm-package)
   - [check-links](#check-links)
   - [e2e-codebuild](#e2e-codebuild)
 
 ## Workflows
+
+### actionlint
+
+Reusable workflow that runs [actionlint](https://github.com/rhysd/actionlint) to lint all GitHub Actions workflow files in the repo. Catches syntax errors, type mismatches, deprecated features, and security issues in workflow YAML.
+
+#### Usage
+
+```yaml
+jobs:
+  actionlint:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/actionlint.yml@main
+```
+
+#### Inputs
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `version` | actionlint version to install | No | `"latest"` |
+
+---
+
+### knip
+
+Reusable workflow that runs [knip](https://knip.dev/) to detect unused dependencies, exports, types, and files. Handles checkout, Node setup, Corepack, registry auth, install, and caching — callers just wire it up.
+
+#### Usage
+
+```yaml
+jobs:
+  knip:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/knip.yml@main
+    secrets:
+      AUTH_TOKEN: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+      REGISTRY: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
+```
+
+#### With options
+
+```yaml
+  knip:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/knip.yml@main
+    with:
+      working_directory: packages/my-lib
+      args: "--include dependencies"
+    secrets:
+      AUTH_TOKEN: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+      REGISTRY: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
+```
+
+#### Inputs
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `node_version` | Node.js version | No | `"20"` |
+| `working_directory` | Directory to run knip in | No | `"."` |
+| `args` | Additional arguments passed to knip | No | `""` |
+
+#### Secrets
+
+| Secret | Description | Required |
+|--------|-------------|----------|
+| `AUTH_TOKEN` | JFrog npm auth token (for installing private deps) | No |
+| `REGISTRY` | JFrog virtual registry URL | No |
+
+#### Husky pre-commit
+
+Same tool, no workflow needed — add directly to `.husky/pre-commit`:
+
+```sh
+npx knip --include dependencies
+```
+
+#### Knip config
+
+For most repos, knip works out of the box. If you need to ignore specific patterns, create `knip.json`:
+
+```json
+{
+  "ignore": ["src/generated/**"],
+  "ignoreDependencies": ["@types/*"]
+}
+```
+
+---
 
 ### publish-npm-package
 

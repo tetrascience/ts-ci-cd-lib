@@ -58,6 +58,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Check if service code changed
         id: check
@@ -86,7 +87,8 @@ jobs:
 
           for pattern in $DEPLOY_PATHS; do
             while IFS= read -r file; do
-              # Use case for glob-style matching of changed files, including ** patterns
+              # Use case for glob-style matching — $pattern is intentionally unquoted
+              # shellcheck disable=SC2254
               case "$file" in
                 $pattern)
                   echo "Match: $file matches $pattern"
@@ -111,7 +113,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # Credentials persist intentionally — the next step pushes to the env branch
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # zizmor: ignore[artipacked]
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_PAT }}
@@ -123,7 +126,7 @@ jobs:
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
-            if git push origin HEAD:refs/heads/$TARGET_ENV --force-with-lease 2>&1; then
+            if git push origin "HEAD:refs/heads/$TARGET_ENV" --force-with-lease 2>&1; then
               echo "Pushed $(git rev-parse HEAD) to $TARGET_ENV"
               exit 0
             fi
@@ -144,7 +147,7 @@ jobs:
           COMMIT_SHA=$(git rev-parse HEAD)
           echo "Waiting for $DEPLOY_WORKFLOW on $DEPLOY_BRANCH branch (commit $COMMIT_SHA)..."
 
-          for i in $(seq 1 40); do
+          for _attempt in $(seq 1 40); do
             sleep 15
             RUN_ID=$(gh run list --branch "$DEPLOY_BRANCH" --workflow "$DEPLOY_WORKFLOW" --limit 20 --json databaseId,headSha,status \
               | jq -r --arg sha "$COMMIT_SHA" '.[] | select(.headSha == $sha) | .databaseId' | head -1)
@@ -177,6 +180,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Resolve environment
         id: env
@@ -221,11 +226,13 @@ jobs:
             exit 1
           fi
 
-          echo "env=$TARGET_ENV" >> "$GITHUB_OUTPUT"
-          echo "account=$ACCOUNT" >> "$GITHUB_OUTPUT"
-          echo "region=$REGION" >> "$GITHUB_OUTPUT"
-          echo "cf_env=$CF_ENV" >> "$GITHUB_OUTPUT"
-          echo "source_bucket=tdp-e2e-source-${ACCOUNT}" >> "$GITHUB_OUTPUT"
+          {
+            echo "env=$TARGET_ENV"
+            echo "account=$ACCOUNT"
+            echo "region=$REGION"
+            echo "cf_env=$CF_ENV"
+            echo "source_bucket=tdp-e2e-source-${ACCOUNT}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
@@ -316,10 +323,12 @@ jobs:
           LOG_STREAM=$(echo "$buildInfo" | jq -r '.builds[0].logs.streamName')
           LOG_LINK=$(echo "$buildInfo" | jq -r '.builds[0].logs.deepLink')
 
-          echo "log_group=$LOG_GROUP" >> "$GITHUB_OUTPUT"
-          echo "log_stream=$LOG_STREAM" >> "$GITHUB_OUTPUT"
-          echo "log_link=$LOG_LINK" >> "$GITHUB_OUTPUT"
-          echo "build_status=$buildStatus" >> "$GITHUB_OUTPUT"
+          {
+            echo "log_group=$LOG_GROUP"
+            echo "log_stream=$LOG_STREAM"
+            echo "log_link=$LOG_LINK"
+            echo "build_status=$buildStatus"
+          } >> "$GITHUB_OUTPUT"
 
           if [[ $SECONDS -gt $MAX_SECONDS ]]; then
             echo "::error::Timeout exceeded ($TIMEOUT min); stopping CodeBuild build $BUILD_ID"

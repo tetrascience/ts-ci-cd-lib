@@ -51,6 +51,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Validate configuration for public npm registry
         env:
@@ -131,8 +133,8 @@ jobs:
         run: |
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          echo "PACKAGE_VERSION=$PACKAGE_VERSION" >> $GITHUB_OUTPUT
-          echo "TAG_VERSION=$TAG_VERSION" >> $GITHUB_OUTPUT
+          echo "PACKAGE_VERSION=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "TAG_VERSION=$TAG_VERSION" >> "$GITHUB_OUTPUT"
           if [[ "$PACKAGE_VERSION" != "$TAG_VERSION" ]]; then
             echo "ERROR: Git tag (v$TAG_VERSION) does not match package.json version ($PACKAGE_VERSION)"
             exit 1
@@ -142,9 +144,15 @@ jobs:
       # Prerelease: Update version with prerelease suffix
       - name: Update version for prerelease
         if: inputs.prerelease_tag != ''
+        env:
+          # Route inputs through env vars — direct ${{ }} in `run:` is a
+          # template-injection vector (attacker-controllable input executed as shell).
+          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+          RUN_NUMBER: ${{ github.run_number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          NEW_VERSION="${CURRENT_VERSION}-${{ inputs.prerelease_tag }}.${{ github.run_number }}.${{ github.run_attempt }}"
+          NEW_VERSION="${CURRENT_VERSION}-${PRERELEASE_TAG}.${RUN_NUMBER}.${RUN_ATTEMPT}"
           jq --arg v "$NEW_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
           echo "Publishing version: $NEW_VERSION"
 
@@ -157,7 +165,7 @@ jobs:
           if [[ "$NORMALIZED_REGISTRY" == "https://registry.npmjs.org" ]]; then
             PACKAGE_NAME=$(node -p "require('./package.json').name")
             if [[ $PACKAGE_NAME == @tetrascience/* ]]; then
-              NEW_PACKAGE_NAME=$(echo $PACKAGE_NAME | sed 's/@tetrascience\//@tetrascience-npm\//')
+              NEW_PACKAGE_NAME=$(echo "$PACKAGE_NAME" | sed 's/@tetrascience\//@tetrascience-npm\//')
               echo "Updating package name from $PACKAGE_NAME to $NEW_PACKAGE_NAME"
               npm pkg set name="$NEW_PACKAGE_NAME"
             else

@@ -1,0 +1,4 @@
+.DS_Store
+.lsmcp/
+jest.e2e.config.js
+actionlint

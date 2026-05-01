@@ -1,0 +1,55 @@
+name: ghactionlint — actionlint + zizmor
+
+# Runs two complementary linters over the caller's .github/workflows/:
+#   - actionlint: syntax, best-practice, and shellcheck lint
+#   - zizmor:     security audit (pwn-requests, template injection,
+#                 untrusted checkouts, permissions, stale action refs)
+
+on:
+  workflow_call:
+    inputs:
+      actionlint_version:
+        description: "actionlint version to install"
+        type: string
+        default: "1.7.12"
+        required: false
+      zizmor_version:
+        description: "zizmor version to install"
+        type: string
+        default: "1.4.1"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  ghactionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        shell: bash
+        env:
+          ACTIONLINT_VERSION: ${{ inputs.actionlint_version }}
+        # Pinned to v1.7.12 commit SHA — tags can be force-pushed
+        run: bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash) "$ACTIONLINT_VERSION"
+
+      - name: Run actionlint
+        run: ./actionlint -color
+
+      - name: Install zizmor
+        shell: bash
+        env:
+          ZIZMOR_VERSION: ${{ inputs.zizmor_version }}
+        run: pipx install "zizmor==${ZIZMOR_VERSION}"
+
+      - name: Run zizmor
+        shell: bash
+        env:
+          # Token enables online audits (stale action refs, known-vulnerable
+          # versions). Offline audits still run without it.
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --format plain .
