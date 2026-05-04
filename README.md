@@ -32,7 +32,11 @@ jobs:
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `actionlint_version` | actionlint version to install | No | `"1.7.12"` |
+| `actionlint_sha256` | SHA-256 of `actionlint_<version>_linux_amd64.tar.gz` (must match `actionlint_version`) | No | pinned to default version |
 | `zizmor_version` | zizmor version to install | No | `"1.16.3"` |
+| `zizmor_sha256` | SHA-256 of `zizmor-x86_64-unknown-linux-gnu.tar.gz` (must match `zizmor_version`) | No | pinned to default version |
+
+Both binaries are downloaded from GitHub release assets and verified against pinned SHA-256 hashes. To bump either tool, set the `*_version` input alongside the matching `*_sha256`.
 
 ---
 
