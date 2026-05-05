@@ -45,6 +45,15 @@ on:
       GITHUB_PAT:
         description: "PAT with cross-repo access and contents:write for deploy push"
         required: true
+      ZEPHYR_API_TOKEN:
+        description: "Zephyr Scale API token. Forwarded to CodeBuild as ZEPHYR_API_TOKEN so the vitest reporter (ts-lib-zephyr-nodejs) can publish results."
+        required: false
+      ZEPHYR_CYCLE_KEY:
+        description: "Zephyr Scale test cycle key (e.g. SW-R1) the reporter posts executions into. Required for the reporter to fire."
+        required: false
+      ZEPHYR_ACCOUNT_ID:
+        description: "Jira account ID used as assignedToId / executedById on new executions. Required for the reporter to fire."
+        required: false
 
 jobs:
   check-changes:
@@ -261,6 +270,9 @@ jobs:
           TARGET_ENV: ${{ inputs.environment }}
           JFROG_URL: ${{ secrets.JFROG_ARTIFACTORY_NPM_VIRTUAL_URL }}
           JFROG_AUTH: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+          ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
+          ZEPHYR_CYCLE_KEY: ${{ secrets.ZEPHYR_CYCLE_KEY }}
+          ZEPHYR_ACCOUNT_ID: ${{ secrets.ZEPHYR_ACCOUNT_ID }}
           S3_LOCATION: ${{ steps.source.outputs.s3_location }}
           BUILDSPEC_PATH: ${{ inputs.buildspec }}
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
@@ -272,7 +284,10 @@ jobs:
             {"name":"E2E_ENVIRONMENT","value":env.TARGET_ENV},
             {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
-          ]')
+          ]
+          + (if (env.ZEPHYR_API_TOKEN // "") != "" then [{"name":"ZEPHYR_API_TOKEN","value":env.ZEPHYR_API_TOKEN}] else [] end)
+          + (if (env.ZEPHYR_CYCLE_KEY // "") != "" then [{"name":"ZEPHYR_CYCLE_KEY","value":env.ZEPHYR_CYCLE_KEY}] else [] end)
+          + (if (env.ZEPHYR_ACCOUNT_ID // "") != "" then [{"name":"ZEPHYR_ACCOUNT_ID","value":env.ZEPHYR_ACCOUNT_ID}] else [] end)')
 
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
