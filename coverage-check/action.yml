@@ -176,7 +176,9 @@ runs:
               else
                 FLOORED=$(echo "$PCT" | awk '{printf "%d", $1}')
                 if [ "$FLOORED" -lt "$THRESHOLD" ]; then
-                  echo "::error file=$file::New/changed code coverage is ${FLOORED}% (required: ${THRESHOLD}%). Add tests to cover the new lines in this file."
+                  echo "::error file=$file::New/changed code coverage is ${FLOORED}% (required: ${THRESHOLD}%) for ${file}. Add tests to cover the new lines in this file."
+                  echo "  -> File: ${file}"
+                  echo "     Coverage: ${FLOORED}% (required: ${THRESHOLD}%)"
                   echo "FAILED" >> /tmp/coverage-check-failed
                 fi
               fi
