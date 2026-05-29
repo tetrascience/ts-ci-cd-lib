@@ -176,7 +176,6 @@ runs:
               else
                 FLOORED=$(echo "$PCT" | awk '{printf "%d", $1}')
                 if [ "$FLOORED" -lt "$THRESHOLD" ]; then
-                  echo "::error file=$file::Coverage below threshold (${FLOORED}% < ${THRESHOLD}%)"
                   echo "${file}|${FLOORED}" >> /tmp/coverage-check-failed
                 fi
               fi
