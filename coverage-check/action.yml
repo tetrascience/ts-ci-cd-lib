@@ -176,14 +176,18 @@ runs:
               else
                 FLOORED=$(echo "$PCT" | awk '{printf "%d", $1}')
                 if [ "$FLOORED" -lt "$THRESHOLD" ]; then
-                  echo "::error file=$file::New/changed code coverage is ${FLOORED}% (required: ${THRESHOLD}%). Add tests to cover the new lines in this file."
-                  echo "FAILED" >> /tmp/coverage-check-failed
+                  echo "${file}|${FLOORED}" >> /tmp/coverage-check-failed
                 fi
               fi
             done || true
 
           if [ -f /tmp/coverage-check-failed ]; then
             FAILED=1
+            echo ""
+            echo "New/changed code coverage below threshold (required: ${THRESHOLD}%). Add tests to cover the new lines in these files:"
+            while IFS='|' read -r f p; do
+              echo "  -> ${f}: ${p}%"
+            done < /tmp/coverage-check-failed
             rm -f /tmp/coverage-check-failed
           fi
         fi
