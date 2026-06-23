@@ -112,6 +112,13 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      # Lets the "Wait for deploy" step poll the triggered deploy run via the
+      # built-in GITHUB_TOKEN (gh run list/watch) instead of the cross-repo PAT.
+      # The PAT is still required for the push above (so the deploy workflow's
+      # `on: push` fires — GITHUB_TOKEN-authored pushes don't trigger workflows).
+      # NOTE: callers must also grant `actions: read` at the workflow/job level,
+      # since a reusable workflow's token is capped by the caller's permissions.
+      actions: read
     steps:
       # Credentials persist intentionally — the next step pushes to the env branch
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # zizmor: ignore[artipacked]
@@ -139,7 +146,10 @@ jobs:
 
       - name: Wait for deploy
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_PAT }}
+          # Same-repo run-status reads only need the built-in token + actions:read
+          # (see the job `permissions` above). Using the PAT here caused 401s when
+          # it lacked Actions-API validity even though it could still push.
+          GH_TOKEN: ${{ github.token }}
           DEPLOY_BRANCH: ${{ inputs.existing_deploy_branch || inputs.environment }}
           DEPLOY_WORKFLOW: ${{ inputs.deploy_workflow }}
         run: |
