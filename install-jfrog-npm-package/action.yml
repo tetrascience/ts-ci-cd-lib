@@ -1,0 +1,68 @@
+name: Install JFrog npm package
+description: >
+  Install a single npm package that is published only to a private JFrog
+  Artifactory registry into an already-installed node_modules, as a leaf
+  tarball. Use this AFTER `yarn install` for packages that cannot be added to
+  package.json / yarn.lock (e.g. repos pinned to the public npm registry, where
+  a private dependency would break external `yarn install`).
+
+inputs:
+  package:
+    description: "npm package name to install (e.g. ts-lib-zephyr-nodejs). Scoped names are supported."
+    required: true
+  version:
+    description: "Exact version to install (e.g. 0.4.0)"
+    required: true
+  registry-url:
+    description: "JFrog virtual (read) registry URL, e.g. https://<org>.jfrog.io/artifactory/api/npm/<repo>/"
+    required: true
+  auth:
+    description: >
+      Auth credential for the read-only Artifactory user. Pass a secret, e.g.
+      secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH. Interpreted per `auth-type`.
+    required: true
+  auth-type:
+    description: "npm auth field: `_auth` (base64 username:password) or `_authToken` (bearer token)"
+    default: "_auth"
+
+runs:
+  using: composite
+  steps:
+    - name: Install ${{ inputs.package }} from JFrog (leaf tarball)
+      shell: bash
+      env:
+        PACKAGE: ${{ inputs.package }}
+        VERSION: ${{ inputs.version }}
+        REGISTRY_URL: ${{ inputs.registry-url }}
+        AUTH: ${{ inputs.auth }}
+        AUTH_TYPE: ${{ inputs.auth-type }}
+      run: |
+        set -euo pipefail
+        # Why a leaf tarball and not `npm install --no-save`: npm reconciles the
+        # entire dependency tree and corrupts a Yarn-managed node_modules
+        # (observed failure: `ENOTEMPTY: directory not empty, rmdir
+        # node_modules/<pkg>/dist`). Fetching just this package's tarball and
+        # extracting it in place touches nothing else.
+        if [ ! -d node_modules ]; then
+          echo "::error::node_modules not found — run this action AFTER 'yarn install'."
+          exit 1
+        fi
+        case "$AUTH_TYPE" in
+          _auth | _authToken) ;;
+          *) echo "::error::auth-type must be '_auth' or '_authToken' (got '$AUTH_TYPE')."; exit 1 ;;
+        esac
+        # Normalize the host: strip scheme and any trailing slash so the auth
+        # line is always `//<host>/:<field>=...` regardless of whether the
+        # registry URL ends with a slash (npm requires the `/` before the field).
+        host="${REGISTRY_URL#https://}"; host="${host#http://}"; host="${host%/}"
+        npmrc="$RUNNER_TEMP/.npmrc-jfrog"
+        printf 'registry=%s\n//%s/:%s=%s\nalways-auth=true\n' \
+          "$REGISTRY_URL" "$host" "$AUTH_TYPE" "$AUTH" > "$npmrc"
+        tgz=$(npm pack "${PACKAGE}@${VERSION}" --userconfig "$npmrc" --registry "$REGISTRY_URL")
+        # `mkdir -p node_modules/<package>` also creates the @scope dir for
+        # scoped packages (node_modules/@scope/name).
+        rm -rf "node_modules/${PACKAGE}"
+        mkdir -p "node_modules/${PACKAGE}"
+        tar -xzf "$tgz" -C "node_modules/${PACKAGE}" --strip-components=1
+        rm -f "$npmrc" "$tgz"
+        echo "Installed ${PACKAGE}@${VERSION} into node_modules/${PACKAGE}"
