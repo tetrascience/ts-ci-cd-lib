@@ -47,6 +47,10 @@ runs:
           echo "::error::node_modules not found — run this action AFTER 'yarn install'."
           exit 1
         fi
+        if [ -z "${PACKAGE}" ] || [ -z "${VERSION}" ]; then
+          echo "::error::inputs.package and inputs.version must be non-empty."
+          exit 1
+        fi
         case "$AUTH_TYPE" in
           _auth | _authToken) ;;
           *) echo "::error::auth-type must be '_auth' or '_authToken' (got '$AUTH_TYPE')."; exit 1 ;;
@@ -55,7 +59,10 @@ runs:
         # line is always `//<host>/:<field>=...` regardless of whether the
         # registry URL ends with a slash (npm requires the `/` before the field).
         host="${REGISTRY_URL#https://}"; host="${host#http://}"; host="${host%/}"
-        npmrc="$RUNNER_TEMP/.npmrc-jfrog"
+        umask 077
+        npmrc="$(mktemp "$RUNNER_TEMP/.npmrc-jfrog.XXXXXX")"
+        cleanup() { rm -f "$npmrc" "${tgz:-}"; }
+        trap cleanup EXIT
         printf 'registry=%s\n//%s/:%s=%s\nalways-auth=true\n' \
           "$REGISTRY_URL" "$host" "$AUTH_TYPE" "$AUTH" > "$npmrc"
         tgz=$(npm pack "${PACKAGE}@${VERSION}" --userconfig "$npmrc" --registry "$REGISTRY_URL")
@@ -64,5 +71,4 @@ runs:
         rm -rf "node_modules/${PACKAGE}"
         mkdir -p "node_modules/${PACKAGE}"
         tar -xzf "$tgz" -C "node_modules/${PACKAGE}" --strip-components=1
-        rm -f "$npmrc" "$tgz"
         echo "Installed ${PACKAGE}@${VERSION} into node_modules/${PACKAGE}"
