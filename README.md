@@ -10,6 +10,8 @@ Reusable CI/CD workflows for TetraScience repositories.
   - [publish-npm-package](#publish-npm-package)
   - [check-links](#check-links)
   - [e2e-codebuild](#e2e-codebuild)
+- [Actions](#actions)
+  - [install-jfrog-npm-package](#install-jfrog-npm-package)
 
 ## Workflows
 
@@ -310,3 +312,50 @@ phases:
 #### Infrastructure
 
 The shared CodeBuild project (`tdp-e2e`) must be deployed per environment via `EnableE2E=true` in the TDP service stack. See [`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml).
+
+## Actions
+
+Composite actions are referenced as a **step** (`uses:`) inside your own job, unlike the reusable workflows above (which are referenced at the job level).
+
+### install-jfrog-npm-package
+
+Installs a single npm package that is published **only** to a private JFrog Artifactory registry, as a leaf tarball extracted into an already-installed `node_modules`.
+
+Use this for packages that cannot be added to `package.json` / `yarn.lock` — for example in a repo pinned to the public npm registry, where adding a private dependency would break external contributors' `yarn install`. The action fetches just the one package via `npm pack` and extracts it in place; it deliberately does **not** use `npm install`, which reconciles the whole dependency tree and corrupts a Yarn-managed `node_modules` (`ENOTEMPTY … rmdir node_modules/<pkg>/dist`).
+
+#### Usage
+
+Run it **after** `yarn install` (it extracts into the existing `node_modules`):
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - uses: actions/setup-node@v4
+    with:
+      node-version: "24"
+      cache: "yarn"
+  - run: corepack enable
+  - run: yarn install --immutable
+
+  - name: Install ts-lib-zephyr-nodejs (JFrog)
+    uses: tetrascience/ts-ci-cd-lib/install-jfrog-npm-package@main
+    with:
+      package: ts-lib-zephyr-nodejs
+      version: "0.4.0"
+      # The virtual registry URL is infra info, not a credential — hardcode it
+      # (or pass a non-environment-scoped secret).
+      registry-url: https://<org>.jfrog.io/artifactory/api/npm/<repo>/
+      auth: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+```
+
+#### Inputs
+
+| Input          | Description                                                                                          | Required | Default |
+| -------------- | ---------------------------------------------------------------------------------------------------- | -------- | ------- |
+| `package`      | npm package name to install (e.g. `ts-lib-zephyr-nodejs`). Scoped names are supported.               | Yes      | —       |
+| `version`      | Exact version to install (e.g. `0.4.0`).                                                             | Yes      | —       |
+| `registry-url` | JFrog virtual (read) registry URL, e.g. `https://<org>.jfrog.io/artifactory/api/npm/<repo>/`.        | Yes      | —       |
+| `auth`         | Read-only Artifactory credential; interpreted per `auth-type`. Pass a secret.                        | Yes      | —       |
+| `auth-type`    | npm auth field: `_auth` (base64 `username:password`) or `_authToken` (bearer token).                 | No       | `_auth` |
+
+> **auth-type:** most TetraScience `JFROG_ARTIFACTORY_*_NPM_AUTH` secrets are a base64 `username:password` identity (npm `_auth`, equivalent to Yarn's `npmAuthIdent`) — the default. Set `auth-type: _authToken` only if your credential is a bearer token.
