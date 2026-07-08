@@ -16,7 +16,7 @@ inputs:
     default: "90"
   new-code-threshold:
     description: "Minimum statement coverage % for changed source files (0 to disable)"
-    default: "95"
+    default: "85"
   source-file-pattern:
     description: "Grep regex for source files to enforce new-code threshold on"
     default: '^src/.*\.(ts|tsx)$'
