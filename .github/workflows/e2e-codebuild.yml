@@ -45,6 +45,9 @@ on:
       GITHUB_PAT:
         description: "PAT with cross-repo access and contents:write for deploy push"
         required: true
+      ZEPHYR_CYCLE_KEY:
+        description: "Optional per-repo Zephyr Scale cycle key. When set, it is passed into the CodeBuild env and takes precedence over the account-scoped SSM cycle key, so a repo's execution results land in its own cycle. Omit to keep the SSM default."
+        required: false
 
 jobs:
   check-changes:
@@ -275,6 +278,7 @@ jobs:
           BUILDSPEC_PATH: ${{ inputs.buildspec }}
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
           COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
+          ZEPHYR_CYCLE_KEY: ${{ secrets.ZEPHYR_CYCLE_KEY }}
         run: |
           set -euo pipefail
 
@@ -283,6 +287,15 @@ jobs:
             {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
+
+          # Forward a caller-supplied Zephyr cycle key only when set, so the
+          # buildspec can prefer it over the account-scoped SSM default. Appended
+          # conditionally so callers that omit it are unaffected (no empty
+          # override that would otherwise suppress the SSM fallback).
+          if [[ -n "${ZEPHYR_CYCLE_KEY:-}" ]]; then
+            ENV_VARS=$(jq -nc --arg v "$ZEPHYR_CYCLE_KEY" --argjson base "$ENV_VARS" \
+              '$base + [{"name":"ZEPHYR_CYCLE_KEY","value":$v}]')
+          fi
 
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
