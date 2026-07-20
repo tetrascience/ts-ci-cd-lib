@@ -29,7 +29,7 @@ runs:
   steps:
     - name: Upload base coverage for PR comparison
       if: github.ref == 'refs/heads/main'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: ${{ inputs.base-coverage-artifact-name }}
         path: ${{ inputs.coverage-path }}coverage-summary.json
@@ -92,7 +92,7 @@ runs:
 
     - name: Report coverage on PR
       if: github.event_name == 'pull_request'
-      uses: davelosert/vitest-coverage-report-action@2500dafcee7dd64f85ab689c0b83798a8359770e # v2
+      uses: davelosert/vitest-coverage-report-action@2500dafcee7dd64f85ab689c0b83798a8359770e # v2.9.3
       with:
         json-summary-path: ${{ inputs.coverage-path }}coverage-summary.json
         json-final-path: ${{ inputs.coverage-path }}coverage-final.json

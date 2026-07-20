@@ -15,6 +15,8 @@ Reusable CI/CD workflows for TetraScience repositories.
 
 ## Workflows
 
+Examples below use `@main` for readability. Production callers should pin reusable workflow references to an immutable release tag or commit SHA.
+
 ### actionlint
 
 Reusable workflow that runs [actionlint](https://github.com/rhysd/actionlint) to lint all GitHub Actions workflow files in the repo. Catches syntax errors, type mismatches, deprecated features, and security issues in workflow YAML.
@@ -24,14 +26,19 @@ Reusable workflow that runs [actionlint](https://github.com/rhysd/actionlint) to
 ```yaml
 jobs:
   actionlint:
-    uses: tetrascience/ts-ci-cd-lib/.github/workflows/actionlint.yml@main
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/ghactionlint.yml@main
 ```
 
 #### Inputs
 
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
-| `version` | actionlint version to install | No | `"latest"` |
+| `actionlint_version` | actionlint version to install | No | `"1.7.12"` |
+| `actionlint_sha256` | SHA-256 of `actionlint_<version>_linux_amd64.tar.gz` (must match `actionlint_version`) | No | pinned to default version |
+| `zizmor_version` | zizmor version to install | No | `"1.16.3"` |
+| `zizmor_sha256` | SHA-256 of `zizmor-x86_64-unknown-linux-gnu.tar.gz` (must match `zizmor_version`) | No | pinned to default version |
+
+Both binaries are downloaded from GitHub release assets and verified against pinned SHA-256 hashes. To bump either tool, set the `*_version` input alongside the matching `*_sha256`.
 
 ---
 
@@ -68,6 +75,7 @@ jobs:
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `node_version` | Node.js version | No | `"20"` |
+| `knip_version` | Knip version to run | No | `"6.10.0"` |
 | `working_directory` | Directory to run knip in | No | `"."` |
 | `args` | Additional arguments passed to knip | No | `""` |
 
@@ -83,7 +91,7 @@ jobs:
 Same tool, no workflow needed — add directly to `.husky/pre-commit`:
 
 ```sh
-npx knip --include dependencies
+npx --yes knip@6.10.0 --include dependencies
 ```
 
 #### Knip config
@@ -133,26 +141,25 @@ jobs:
 | `prerelease_tag` | Prerelease tag for version suffix and npm dist-tag (e.g., alpha, beta). Leave empty for non-prerelease versions. | No | `""` |
 | `run_tests` | Whether to run tests before publishing | No | `true` |
 | `publish_to_public_npm` | Set to true to confirm publishing to public npm registry | No | `false` |
-| `pre_install_command` | Shell command to run after checkout + auth but before install. Runs at repo root (not `working_directory`) in the same job environment, including any provided secrets/tokens. Use for codegen that produces the `working_directory` contents, and avoid echoing or logging sensitive values. | No | `""` |
+| `pre_install_command` | Shell command to run after checkout and before registry auth + install. Runs at repo root (not `working_directory`). Use for codegen that produces the `working_directory` contents, and keep the value static in the caller workflow. | No | `""` |
 
 #### Secrets
 
 | Secret | Description | Required |
 |--------|-------------|----------|
-| `AUTH_TOKEN` | Authentication token for JFrog Artifactory | Yes |
-| `REGISTRY` | JFrog Artifactory npm registry URL (for installing dependencies) | Yes |
+| `AUTH_TOKEN` | Authentication token for JFrog Artifactory | No |
+| `REGISTRY` | JFrog Artifactory npm registry URL (for installing dependencies) | No |
 | `PUBLISH_REGISTRY` | Registry URL for publishing the package | Yes |
-| `NPM_TOKEN` | npm token (required when publishing to public npm registry) | No |
 
 #### Publishing to Public npm Registry
 
 To publish to the public npm registry (`https://registry.npmjs.org`):
 
 1. Set `publish_to_public_npm: true` in the workflow inputs
-2. Provide the `NPM_TOKEN` secret
+2. Configure npm trusted publishing for the package
 3. Set `PUBLISH_REGISTRY` to `https://registry.npmjs.org`
 
-The workflow will automatically update the package scope from `@tetrascience` to `@tetrascience-npm` when publishing to the public registry.
+The workflow uses OIDC trusted publishing for public npm publishes and automatically updates the package scope from `@tetrascience` to `@tetrascience-npm` when publishing to the public registry.
 
 ### check-links
 
@@ -293,6 +300,7 @@ phases:
 | `deploy_workflow` | No | `ci.yml` | Workflow waited on after pushing to env branch |
 | `image_override` | No | | Override CodeBuild image |
 | `compute_type_override` | No | | Override CodeBuild compute (e.g. `BUILD_GENERAL1_MEDIUM`) |
+| `stream_codebuild_logs` | No | `false` | Stream raw CodeBuild logs into the GitHub Actions log |
 | `timeout_minutes` | No | `25` | Max minutes for the E2E job |
 
 #### Secrets
@@ -307,7 +315,7 @@ phases:
 
 1. **check-changes** — compares changed files against `deploy_paths`. Skipped if `deploy_paths` is empty.
 2. **deploy** — pushes to the env branch, waits for the deploy workflow to complete. Skipped if no service code changed.
-3. **e2e** — uploads source to S3, triggers CodeBuild, streams logs, writes job summary.
+3. **e2e** — uploads source to S3, triggers CodeBuild, writes job summary, and links CloudWatch logs. Raw log streaming is opt-in with `stream_codebuild_logs`.
 
 #### Infrastructure
 

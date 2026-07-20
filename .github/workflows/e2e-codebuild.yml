@@ -37,6 +37,11 @@ on:
         type: number
         default: 25
         required: false
+      stream_codebuild_logs:
+        description: "Stream raw CodeBuild logs into the GitHub Actions log"
+        type: boolean
+        default: false
+        required: false
     secrets:
       JFROG_ARTIFACTORY_NPM_VIRTUAL_URL:
         required: true
@@ -49,8 +54,12 @@ on:
         description: "Optional per-repo Zephyr Scale cycle key. When set, it is passed into the CodeBuild env and takes precedence over the account-scoped SSM cycle key, so a repo's execution results land in its own cycle. Omit to keep the SSM default."
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   check-changes:
+    name: Check deploy changes
     if: ${{ inputs.deploy_paths != '' }}
     runs-on: ubuntu-latest
     permissions:
@@ -106,6 +115,7 @@ jobs:
           echo "should_deploy=false" >> "$GITHUB_OUTPUT"
 
   deploy:
+    name: Deploy to environment branch
     needs: check-changes
     if: ${{ needs.check-changes.outputs.should_deploy == 'true' }}
     runs-on: ubuntu-latest
@@ -123,6 +133,20 @@ jobs:
       # since a reusable workflow's token is capped by the caller's permissions.
       actions: read
     steps:
+      - name: Validate environment
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          case "$TARGET_ENV" in
+            predev|predev2|predev3|predev4|predev5|predev6|predev7|predev8|dev|preuat)
+              ;;
+            *)
+              echo "::error::Unknown environment: $TARGET_ENV"
+              exit 1
+              ;;
+          esac
+
       # Credentials persist intentionally — the next step pushes to the env branch
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # zizmor: ignore[artipacked]
         with:
@@ -180,6 +204,7 @@ jobs:
 
 
   e2e:
+    name: Run CodeBuild E2E
     needs: [check-changes, deploy]
     if: |
       always() &&
@@ -188,6 +213,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
     permissions:
+      # Required for assuming the per-environment AWS OIDC role.
       id-token: write
       contents: read
 
@@ -360,7 +386,7 @@ jobs:
           fi
 
       - name: Fetch CodeBuild logs
-        if: always() && steps.wait.outputs.log_stream != ''
+        if: always() && inputs.stream_codebuild_logs == true && steps.wait.outputs.log_stream != ''
         env:
           LOG_GROUP: ${{ steps.wait.outputs.log_group }}
           LOG_STREAM: ${{ steps.wait.outputs.log_stream }}

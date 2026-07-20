@@ -4,6 +4,11 @@ name: ghactionlint — actionlint + zizmor
 #   - actionlint: syntax, best-practice, and shellcheck lint
 #   - zizmor:     security audit (pwn-requests, template injection,
 #                 untrusted checkouts, permissions, stale action refs)
+#
+# Both binaries are downloaded directly from their GitHub release assets
+# and verified against pinned SHA-256 hashes — no `bash <(curl ...)`,
+# no pipx/PyPI in the trust path. If a caller overrides *_version, they
+# must also override the matching *_sha256.
 
 on:
   workflow_call:
@@ -13,10 +18,20 @@ on:
         type: string
         default: "1.7.12"
         required: false
+      actionlint_sha256:
+        description: "SHA-256 of actionlint_<version>_linux_amd64.tar.gz (must match actionlint_version)"
+        type: string
+        default: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+        required: false
       zizmor_version:
         description: "zizmor version to install"
         type: string
-        default: "1.4.1"
+        default: "1.16.3"
+        required: false
+      zizmor_sha256:
+        description: "SHA-256 of zizmor-x86_64-unknown-linux-gnu.tar.gz (must match zizmor_version)"
+        type: string
+        default: "f0070985e94dd7b29e30abe249f6c7b2f14078c35a8f2de78e2d6ce89de0c132"
         required: false
 
 permissions:
@@ -24,18 +39,25 @@ permissions:
 
 jobs:
   ghactionlint:
+    name: GitHub Actions lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
 
       - name: Install actionlint
         shell: bash
         env:
-          ACTIONLINT_VERSION: ${{ inputs.actionlint_version }}
-        # Pinned to v1.7.12 commit SHA — tags can be force-pushed
-        run: bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash) "$ACTIONLINT_VERSION"
+          VERSION: ${{ inputs.actionlint_version }}
+          EXPECTED_SHA256: ${{ inputs.actionlint_sha256 }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o actionlint.tgz \
+            "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz"
+          echo "${EXPECTED_SHA256}  actionlint.tgz" | sha256sum -c -
+          tar -xzf actionlint.tgz actionlint
+          rm actionlint.tgz
 
       - name: Run actionlint
         run: ./actionlint -color
@@ -43,8 +65,16 @@ jobs:
       - name: Install zizmor
         shell: bash
         env:
-          ZIZMOR_VERSION: ${{ inputs.zizmor_version }}
-        run: pipx install "zizmor==${ZIZMOR_VERSION}"
+          VERSION: ${{ inputs.zizmor_version }}
+          EXPECTED_SHA256: ${{ inputs.zizmor_sha256 }}
+        run: |
+          set -euo pipefail
+          curl -fsSL -o zizmor.tgz \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${EXPECTED_SHA256}  zizmor.tgz" | sha256sum -c -
+          tar -xzf zizmor.tgz ./zizmor
+          chmod +x ./zizmor
+          rm zizmor.tgz
 
       - name: Run zizmor
         shell: bash
@@ -52,4 +82,4 @@ jobs:
           # Token enables online audits (stale action refs, known-vulnerable
           # versions). Offline audits still run without it.
           GH_TOKEN: ${{ github.token }}
-        run: zizmor --format plain .
+        run: ./zizmor --format plain .

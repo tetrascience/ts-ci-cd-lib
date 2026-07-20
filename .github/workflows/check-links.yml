@@ -9,8 +9,12 @@ on:
         default: "--cache --max-cache-age 1d ."
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   check-links:
+    name: Check links
     runs-on: ubuntu-latest
 
     steps:
@@ -27,7 +31,7 @@ jobs:
           restore-keys: cache-lychee-
 
       - name: Lychee link check
-        uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2
+        uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2.7.0
         with:
           args: ${{ inputs.lychee_args }}
         env:

@@ -8,12 +8,17 @@ on:
       - labeled
       - unlabeled
 
+permissions:
+  contents: read
+
 jobs:
   check:
+    name: PR title
     # Skip for forked PRs
     if: github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
+      # Required to add/remove the status label and comment on the PR.
       pull-requests: write
     runs-on: ubuntu-latest
     steps:
@@ -21,4 +26,3 @@ jobs:
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           configuration_path: ".github/pr-title-checker-config.json"
-
