@@ -4,9 +4,9 @@ on:
   workflow_call:
     inputs:
       node_version:
-        description: Node.js version
+        description: Node.js version (must be >=24 when publish_to_public_npm is true — OIDC needs the bundled npm >=11.5.1)
         type: string
-        default: "20"
+        default: "24"
         required: false
       working_directory:
         description: "Directory containing the package to publish (default: repo root)"
@@ -80,11 +80,16 @@ jobs:
           corepack enable
           echo "Yarn version: $(yarn --version)"
 
-      - name: Install npm for OIDC support
+      - name: Verify npm supports OIDC trusted publishing
         if: inputs.publish_to_public_npm == true
         run: |
-          npm install -g npm@latest
-          echo "Installed npm version: $(npm --version)"
+          NPM_VERSION=$(npm --version)
+          # OIDC trusted publishing needs npm >=11.5.1, bundled with Node >=24
+          node -e "const [a,b,c]='$NPM_VERSION'.split('.').map(Number); process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)" || {
+            echo "ERROR: npm $NPM_VERSION does not support OIDC trusted publishing (needs >=11.5.1). Set node_version to 24 or later."
+            exit 1
+          }
+          echo "npm version: $NPM_VERSION"
 
       - name: Configure JFrog Artifactory
         env:
