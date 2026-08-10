@@ -287,8 +287,8 @@ phases:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `environment` | **Yes** | | Target environment (e.g. `predev5`, `dev`) |
-| `deploy_paths` | **Yes** | | Globs that trigger deploy. Empty = skip deploy. |
+| `environment` | **Yes** | | Target environment. One of `predev`, `predev2`…`predev8`, `dev`, `preuat`, `uat`. |
+| `deploy_paths` | **Yes** | | Globs that trigger deploy. Empty = never deploy (observe-only, see below). |
 | `buildspec` | **Yes** | | Path to buildspec in the caller repo |
 | `deploy_workflow` | No | `ci.yml` | Workflow waited on after pushing to env branch |
 | `image_override` | No | | Override CodeBuild image |
@@ -309,9 +309,47 @@ phases:
 2. **deploy** — pushes to the env branch, waits for the deploy workflow to complete. Skipped if no service code changed.
 3. **e2e** — uploads source to S3, triggers CodeBuild, streams logs, writes job summary.
 
+#### Observe-only mode
+
+Passing `deploy_paths: ''` skips **check-changes** and **deploy**, leaving only the
+CodeBuild run. Use it against environments this pipeline does not deploy — `uat` and
+`preuat` are released manually by devops, all repos together, from a release branch — so
+the suite verifies what is already there rather than what a PR would ship.
+
+Pair it with a `workflow_dispatch` trigger in the caller. The caller workflow must exist
+on whichever branch you dispatch from, so it has to be backported to release branches
+alongside the suite.
+
+```yaml
+on:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/e2e-codebuild.yml@main
+    with:
+      environment: uat
+      deploy_paths: ''
+      buildspec: buildspec.e2e.yml
+    secrets: ...
+```
+
+`GITHUB_PAT` is still declared required even though nothing uses it once the deploy job
+is skipped.
+
 #### Infrastructure
 
-The shared CodeBuild project (`tdp-e2e`) must be deployed per environment via `EnableE2E=true` in the TDP service stack. See [`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml).
+The shared CodeBuild project (`tdp-e2e`) must exist in the target account before an
+environment can be used. It comes from
+[`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml),
+deployed either as a substack of the TDP service stack via `EnableE2E=true` or as a
+standalone stack. One project per account serves every repo: source and buildspec are
+per-call overrides, and uploads are namespaced by repo name.
+
+The workflow derives the role (`gha-tdp-e2e-<cf_env>`) and bucket
+(`tdp-e2e-source-<account>`) by convention, so an environment's `CF_ENVIRONMENTS` entry
+must match that stack's `EnvironmentName` — which the parent takes from the data stack's
+`-Environment` export.
 
 ## Actions
 
