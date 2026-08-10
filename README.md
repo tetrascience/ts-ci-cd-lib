@@ -307,10 +307,8 @@ phases:
 | `ZEPHYR_ACCOUNT_ID` | No | Jira account id for `executedById` |
 
 The three Zephyr secrets are forwarded as CodeBuild environment variables **only when
-non-empty**, so omitting them leaves the buildspec's `/tdp/e2e/zephyr/*` SSM lookups in
-charge. Pass them when the target account's parameters have not been seeded — seeding
-them needs SSM write access there, which a service team may not have, while the same
-values usually already exist as GitHub secrets.
+non-empty**, so omitting them leaves the buildspec's own lookups in charge. Pass them
+when the caller already holds these values as GitHub secrets.
 
 > **Buildspec authors:** a buildspec that assigns these unconditionally will clobber
 > what the workflow passes. Prefer the inbound value:
@@ -327,13 +325,12 @@ values usually already exist as GitHub secrets.
 #### Observe-only mode
 
 Passing `deploy_paths: ''` skips **check-changes** and **deploy**, leaving only the
-CodeBuild run. Use it against environments this pipeline does not deploy — `uat` and
-`preuat` are released manually by devops, all repos together, from a release branch — so
-the suite verifies what is already there rather than what a PR would ship.
+CodeBuild run. Use it against environments this pipeline does not deploy, so the suite
+verifies what is already there rather than what a PR would ship. Those environments
+reject a non-empty `deploy_paths` outright.
 
 Pair it with a `workflow_dispatch` trigger in the caller. The caller workflow must exist
-on whichever branch you dispatch from, so it has to be backported to release branches
-alongside the suite.
+on whichever branch you dispatch from.
 
 ```yaml
 on:
@@ -361,10 +358,8 @@ deployed either as a substack of the TDP service stack via `EnableE2E=true` or a
 standalone stack. One project per account serves every repo: source and buildspec are
 per-call overrides, and uploads are namespaced by repo name.
 
-The workflow derives the role (`gha-tdp-e2e-<cf_env>`) and bucket
-(`tdp-e2e-source-<account>`) by convention, so an environment's `CF_ENVIRONMENTS` entry
-must match that stack's `EnvironmentName` — which the parent takes from the data stack's
-`-Environment` export.
+The workflow derives the role and bucket names by convention, so an environment's
+`CF_ENVIRONMENTS` entry must match that stack's `EnvironmentName`.
 
 ## Actions
 

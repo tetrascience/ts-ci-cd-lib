@@ -49,7 +49,7 @@ on:
         description: "Optional per-repo Zephyr Scale cycle key. When set, it is passed into the CodeBuild env and takes precedence over the account-scoped SSM cycle key, so a repo's execution results land in its own cycle. Omit to keep the SSM default."
         required: false
       ZEPHYR_API_TOKEN:
-        description: "Optional Zephyr Scale API token. Same precedence as ZEPHYR_CYCLE_KEY. Lets a repo report from an environment whose /tdp/e2e/zephyr/* parameters have not been seeded, which otherwise needs SSM write access in that account."
+        description: "Optional Zephyr Scale API token. Same precedence as ZEPHYR_CYCLE_KEY. Lets a caller supply the token directly instead of relying on the buildspec's own lookup."
         required: false
       ZEPHYR_ACCOUNT_ID:
         description: "Optional Jira account id used for Zephyr executedById. Same precedence as ZEPHYR_CYCLE_KEY."
@@ -73,21 +73,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          # These environments are released from ts-cloudformation-service (its
-          # "Deployment UAT" workflow, triggered by pushing an RC branch there),
-          # not from any branch in a service repo. So this is a misconfiguration
-          # tripwire, NOT a deployment safety control: the deploy job's only
-          # mechanism is force-pushing HEAD to a branch named after the
-          # environment, and nothing in these environments watches service-repo
-          # branches. Setting deploy_paths here cannot ship code to them.
+          # These environments are released elsewhere, so deploy_paths has no
+          # valid meaning for them. This is a misconfiguration tripwire, not a
+          # safety control: the deploy job pushes to a branch named after the
+          # environment, and nothing in these environments consumes that.
           #
-          # What it does prevent is the mess: a junk `uat`/`preuat` branch created
-          # in the caller repo, followed by "Wait for deploy" polling for a CI run
-          # that never starts until it times out. Failing in seconds with a clear
-          # message beats twenty minutes of confusion.
+          # Without the check the run creates a stray branch and then waits for a
+          # deploy that never starts, until it times out. Failing immediately with
+          # a clear message is cheaper.
           #
-          # Keep in sync with ACCOUNTS in the e2e job below: anything added there
-          # that devops releases rather than this pipeline deploying belongs here.
+          # Keep in sync with ACCOUNTS in the e2e job below.
           RELEASE_ENVIRONMENTS="uat preuat"
 
           for release_env in $RELEASE_ENVIRONMENTS; do
@@ -268,10 +263,8 @@ jobs:
             [uat]=us-west-2
           )
 
-          # CloudFormation Environment value used in IAM role names. It must match
-          # the tdp-e2e stack's EnvironmentName, which the parent takes from the
-          # data stack's -Environment export. All predev/dev environments export
-          # "development"; preuat exports "preuat" and uat exports "uat".
+          # CloudFormation Environment value used in IAM role names. Must match the
+          # tdp-e2e stack's EnvironmentName for that environment.
           declare -A CF_ENVIRONMENTS=(
             [preuat]=preuat
             [uat]=uat
@@ -338,19 +331,14 @@ jobs:
           ]')
 
           # Forward caller-supplied Zephyr settings only when set, so the buildspec
-          # can prefer them over the account-scoped SSM defaults. Appended
-          # conditionally so callers that omit them are unaffected (no empty
-          # override that would otherwise suppress the SSM fallback).
+          # can prefer them over its own defaults. Appended conditionally so
+          # callers that omit them are unaffected (no empty override that would
+          # otherwise suppress the buildspec's fallback). Useful where a caller
+          # holds these values as GitHub secrets already.
           #
-          # The token and account id matter for environments whose
-          # /tdp/e2e/zephyr/* parameters have not been seeded: writing those needs
-          # SSM write access in that account, which a service team may not have,
-          # whereas the same values usually already exist as GitHub secrets.
-          #
-          # NOTE for buildspec authors: a buildspec that assigns these
-          # unconditionally (`export ZEPHYR_CYCLE_KEY=$(aws ssm get-parameter ...)`)
-          # clobbers what is passed here. Prefer the inbound value:
-          #   export ZEPHYR_CYCLE_KEY="${ZEPHYR_CYCLE_KEY:-$(aws ssm ... || echo "")}"
+          # NOTE for buildspec authors: assigning these unconditionally clobbers
+          # what is passed here. Prefer the inbound value:
+          #   export ZEPHYR_CYCLE_KEY="${ZEPHYR_CYCLE_KEY:-<your fallback>}"
           for var in ZEPHYR_CYCLE_KEY ZEPHYR_API_TOKEN ZEPHYR_ACCOUNT_ID; do
             value="${!var:-}"
             if [[ -n "$value" ]]; then
