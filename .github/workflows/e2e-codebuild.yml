@@ -64,6 +64,41 @@ jobs:
     outputs:
       should_deploy: ${{ steps.check.outputs.should_deploy }}
     steps:
+      # Runs before anything else in the job, and this job only runs when
+      # deploy_paths is non-empty — so reaching it at all with a release
+      # environment is the misconfiguration being caught.
+      - name: Reject deploy_paths for release environments
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+
+          # These environments are released from ts-cloudformation-service (its
+          # "Deployment UAT" workflow, triggered by pushing an RC branch there),
+          # not from any branch in a service repo. So this is a misconfiguration
+          # tripwire, NOT a deployment safety control: the deploy job's only
+          # mechanism is force-pushing HEAD to a branch named after the
+          # environment, and nothing in these environments watches service-repo
+          # branches. Setting deploy_paths here cannot ship code to them.
+          #
+          # What it does prevent is the mess: a junk `uat`/`preuat` branch created
+          # in the caller repo, followed by "Wait for deploy" polling for a CI run
+          # that never starts until it times out. Failing in seconds with a clear
+          # message beats twenty minutes of confusion.
+          #
+          # Keep in sync with ACCOUNTS in the e2e job below: anything added there
+          # that devops releases rather than this pipeline deploying belongs here.
+          RELEASE_ENVIRONMENTS="uat preuat"
+
+          for release_env in $RELEASE_ENVIRONMENTS; do
+            if [[ "$TARGET_ENV" == "$release_env" ]]; then
+              echo "::error::'$TARGET_ENV' is released from ts-cloudformation-service, not deployed by this pipeline, so deploy_paths has no valid meaning here. Pass deploy_paths: '' to run the suite against what is already deployed."
+              exit 1
+            fi
+          done
+
+          echo "$TARGET_ENV is a pipeline-deployed environment; continuing."
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
