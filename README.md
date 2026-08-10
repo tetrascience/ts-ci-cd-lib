@@ -297,11 +297,26 @@ phases:
 
 #### Secrets
 
-| Secret | Description |
-|--------|-------------|
-| `JFROG_ARTIFACTORY_NPM_VIRTUAL_URL` | JFrog npm registry URL |
-| `JFROG_ARTIFACTORY_READ_NPM_AUTH` | JFrog npm credentials |
-| `GITHUB_PAT` | PAT for cross-repo access + deploy push |
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `JFROG_ARTIFACTORY_NPM_VIRTUAL_URL` | **Yes** | JFrog npm registry URL |
+| `JFROG_ARTIFACTORY_READ_NPM_AUTH` | **Yes** | JFrog npm credentials |
+| `GITHUB_PAT` | **Yes** | PAT for cross-repo access + deploy push |
+| `ZEPHYR_CYCLE_KEY` | No | Cycle to record into |
+| `ZEPHYR_API_TOKEN` | No | Zephyr Scale API token |
+| `ZEPHYR_ACCOUNT_ID` | No | Jira account id for `executedById` |
+
+The three Zephyr secrets are forwarded as CodeBuild environment variables **only when
+non-empty**, so omitting them leaves the buildspec's `/tdp/e2e/zephyr/*` SSM lookups in
+charge. Pass them when the target account's parameters have not been seeded — seeding
+them needs SSM write access there, which a service team may not have, while the same
+values usually already exist as GitHub secrets.
+
+> **Buildspec authors:** a buildspec that assigns these unconditionally will clobber
+> what the workflow passes. Prefer the inbound value:
+> ```sh
+> export ZEPHYR_CYCLE_KEY="${ZEPHYR_CYCLE_KEY:-$(aws ssm get-parameter ... || echo "")}"
+> ```
 
 #### How it works
 

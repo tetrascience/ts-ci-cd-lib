@@ -48,6 +48,12 @@ on:
       ZEPHYR_CYCLE_KEY:
         description: "Optional per-repo Zephyr Scale cycle key. When set, it is passed into the CodeBuild env and takes precedence over the account-scoped SSM cycle key, so a repo's execution results land in its own cycle. Omit to keep the SSM default."
         required: false
+      ZEPHYR_API_TOKEN:
+        description: "Optional Zephyr Scale API token. Same precedence as ZEPHYR_CYCLE_KEY. Lets a repo report from an environment whose /tdp/e2e/zephyr/* parameters have not been seeded, which otherwise needs SSM write access in that account."
+        required: false
+      ZEPHYR_ACCOUNT_ID:
+        description: "Optional Jira account id used for Zephyr executedById. Same precedence as ZEPHYR_CYCLE_KEY."
+        required: false
 
 jobs:
   check-changes:
@@ -285,6 +291,8 @@ jobs:
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
           COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
           ZEPHYR_CYCLE_KEY: ${{ secrets.ZEPHYR_CYCLE_KEY }}
+          ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
+          ZEPHYR_ACCOUNT_ID: ${{ secrets.ZEPHYR_ACCOUNT_ID }}
         run: |
           set -euo pipefail
 
@@ -294,14 +302,27 @@ jobs:
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
 
-          # Forward a caller-supplied Zephyr cycle key only when set, so the
-          # buildspec can prefer it over the account-scoped SSM default. Appended
-          # conditionally so callers that omit it are unaffected (no empty
+          # Forward caller-supplied Zephyr settings only when set, so the buildspec
+          # can prefer them over the account-scoped SSM defaults. Appended
+          # conditionally so callers that omit them are unaffected (no empty
           # override that would otherwise suppress the SSM fallback).
-          if [[ -n "${ZEPHYR_CYCLE_KEY:-}" ]]; then
-            ENV_VARS=$(jq -nc --arg v "$ZEPHYR_CYCLE_KEY" --argjson base "$ENV_VARS" \
-              '$base + [{"name":"ZEPHYR_CYCLE_KEY","value":$v}]')
-          fi
+          #
+          # The token and account id matter for environments whose
+          # /tdp/e2e/zephyr/* parameters have not been seeded: writing those needs
+          # SSM write access in that account, which a service team may not have,
+          # whereas the same values usually already exist as GitHub secrets.
+          #
+          # NOTE for buildspec authors: a buildspec that assigns these
+          # unconditionally (`export ZEPHYR_CYCLE_KEY=$(aws ssm get-parameter ...)`)
+          # clobbers what is passed here. Prefer the inbound value:
+          #   export ZEPHYR_CYCLE_KEY="${ZEPHYR_CYCLE_KEY:-$(aws ssm ... || echo "")}"
+          for var in ZEPHYR_CYCLE_KEY ZEPHYR_API_TOKEN ZEPHYR_ACCOUNT_ID; do
+            value="${!var:-}"
+            if [[ -n "$value" ]]; then
+              ENV_VARS=$(jq -nc --arg n "$var" --arg v "$value" --argjson base "$ENV_VARS" \
+                '$base + [{"name":$n,"value":$v}]')
+            fi
+          done
 
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
