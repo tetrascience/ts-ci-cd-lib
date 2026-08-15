@@ -287,8 +287,8 @@ phases:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `environment` | **Yes** | | Target environment (e.g. `predev5`, `dev`) |
-| `deploy_paths` | **Yes** | | Globs that trigger deploy. Empty = skip deploy. |
+| `environment` | **Yes** | | Target environment. One of `predev`, `predev2`…`predev8`, `dev`, `preuat`, `uat`. |
+| `deploy_paths` | **Yes** | | Globs that trigger deploy. Empty = never deploy (observe-only, see below). |
 | `buildspec` | **Yes** | | Path to buildspec in the caller repo |
 | `deploy_workflow` | No | `ci.yml` | Workflow waited on after pushing to env branch |
 | `image_override` | No | | Override CodeBuild image |
@@ -297,11 +297,24 @@ phases:
 
 #### Secrets
 
-| Secret | Description |
-|--------|-------------|
-| `JFROG_ARTIFACTORY_NPM_VIRTUAL_URL` | JFrog npm registry URL |
-| `JFROG_ARTIFACTORY_READ_NPM_AUTH` | JFrog npm credentials |
-| `GITHUB_PAT` | PAT for cross-repo access + deploy push |
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `JFROG_ARTIFACTORY_NPM_VIRTUAL_URL` | **Yes** | JFrog npm registry URL |
+| `JFROG_ARTIFACTORY_READ_NPM_AUTH` | **Yes** | JFrog npm credentials |
+| `GITHUB_PAT` | **Yes** | PAT for cross-repo access + deploy push |
+| `ZEPHYR_CYCLE_KEY` | No | Cycle to record into |
+| `ZEPHYR_API_TOKEN` | No | Zephyr Scale API token |
+| `ZEPHYR_ACCOUNT_ID` | No | Jira account id for `executedById` |
+
+The three Zephyr secrets are forwarded as CodeBuild environment variables **only when
+non-empty**, so omitting them leaves the buildspec's own lookups in charge. Pass them
+when the caller already holds these values as GitHub secrets.
+
+> **Buildspec authors:** a buildspec that assigns these unconditionally will clobber
+> what the workflow passes. Prefer the inbound value:
+> ```sh
+> export ZEPHYR_CYCLE_KEY="${ZEPHYR_CYCLE_KEY:-$(aws ssm get-parameter ... || echo "")}"
+> ```
 
 #### How it works
 
@@ -309,9 +322,44 @@ phases:
 2. **deploy** — pushes to the env branch, waits for the deploy workflow to complete. Skipped if no service code changed.
 3. **e2e** — uploads source to S3, triggers CodeBuild, streams logs, writes job summary.
 
+#### Observe-only mode
+
+Passing `deploy_paths: ''` skips **check-changes** and **deploy**, leaving only the
+CodeBuild run. Use it against environments this pipeline does not deploy, so the suite
+verifies what is already there rather than what a PR would ship. Those environments
+reject a non-empty `deploy_paths` outright.
+
+Pair it with a `workflow_dispatch` trigger in the caller. The caller workflow must exist
+on whichever branch you dispatch from.
+
+```yaml
+on:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/e2e-codebuild.yml@main
+    with:
+      environment: uat
+      deploy_paths: ''
+      buildspec: buildspec.e2e.yml
+    secrets: ...
+```
+
+`GITHUB_PAT` is still declared required even though nothing uses it once the deploy job
+is skipped.
+
 #### Infrastructure
 
-The shared CodeBuild project (`tdp-e2e`) must be deployed per environment via `EnableE2E=true` in the TDP service stack. See [`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml).
+The shared CodeBuild project (`tdp-e2e`) must exist in the target account before an
+environment can be used. It comes from
+[`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml),
+deployed either as a substack of the TDP service stack via `EnableE2E=true` or as a
+standalone stack. One project per account serves every repo: source and buildspec are
+per-call overrides, and uploads are namespaced by repo name.
+
+The workflow derives the role and bucket names by convention, so an environment's
+`CF_ENVIRONMENTS` entry must match that stack's `EnvironmentName`.
 
 ## Actions
 

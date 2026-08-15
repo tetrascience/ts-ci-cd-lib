@@ -48,6 +48,12 @@ on:
       ZEPHYR_CYCLE_KEY:
         description: "Optional per-repo Zephyr Scale cycle key. When set, it is passed into the CodeBuild env and takes precedence over the account-scoped SSM cycle key, so a repo's execution results land in its own cycle. Omit to keep the SSM default."
         required: false
+      ZEPHYR_API_TOKEN:
+        description: "Optional Zephyr Scale API token. Same precedence as ZEPHYR_CYCLE_KEY. Lets a caller supply the token directly instead of relying on the buildspec's own lookup."
+        required: false
+      ZEPHYR_ACCOUNT_ID:
+        description: "Optional Jira account id used for Zephyr executedById. Same precedence as ZEPHYR_CYCLE_KEY."
+        required: false
 
 jobs:
   check-changes:
@@ -58,6 +64,36 @@ jobs:
     outputs:
       should_deploy: ${{ steps.check.outputs.should_deploy }}
     steps:
+      # Runs before anything else in the job, and this job only runs when
+      # deploy_paths is non-empty — so reaching it at all with a release
+      # environment is the misconfiguration being caught.
+      - name: Reject deploy_paths for release environments
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+
+          # These environments are released elsewhere, so deploy_paths has no
+          # valid meaning for them. This is a misconfiguration tripwire, not a
+          # safety control: the deploy job pushes to a branch named after the
+          # environment, and nothing in these environments consumes that.
+          #
+          # Without the check the run creates a stray branch and then waits for a
+          # deploy that never starts, until it times out. Failing immediately with
+          # a clear message is cheaper.
+          #
+          # Keep in sync with ACCOUNTS in the e2e job below.
+          RELEASE_ENVIRONMENTS="uat preuat"
+
+          for release_env in $RELEASE_ENVIRONMENTS; do
+            if [[ "$TARGET_ENV" == "$release_env" ]]; then
+              echo "::error::'$TARGET_ENV' is released from ts-cloudformation-service, not deployed by this pipeline, so deploy_paths has no valid meaning here. Pass deploy_paths: '' to run the suite against what is already deployed."
+              exit 1
+            fi
+          done
+
+          echo "$TARGET_ENV is a pipeline-deployed environment; continuing."
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
@@ -204,8 +240,9 @@ jobs:
           set -euo pipefail
 
           # Environment → AWS account mapping.
-          # The E2E infra (CodeBuild, OIDC role, S3 bucket) is deployed as a
-          # substack of the TDP service stack via EnableE2E=true.
+          # The E2E infra (CodeBuild, OIDC role, S3 bucket) comes from
+          # infrastructure/tdp-e2e.yaml, deployed either as a substack of the TDP
+          # service stack via EnableE2E=true or as a standalone stack.
           # Account IDs and regions are stable infrastructure facts.
           declare -A ACCOUNTS=(
             [predev]=611255221147
@@ -218,16 +255,19 @@ jobs:
             [predev8]=581141123528
             [dev]=706717599419
             [preuat]=555180171822
+            [uat]=753968983172
           )
 
           declare -A REGIONS=(
             [preuat]=us-west-2
+            [uat]=us-west-2
           )
 
-          # CloudFormation Environment value used in IAM role names.
-          # All predev/dev environments use "development"; preuat uses "preuat".
+          # CloudFormation Environment value used in IAM role names. Must match the
+          # tdp-e2e stack's EnvironmentName for that environment.
           declare -A CF_ENVIRONMENTS=(
             [preuat]=preuat
+            [uat]=uat
           )
 
           ACCOUNT="${ACCOUNTS[$TARGET_ENV]:-}"
@@ -279,6 +319,8 @@ jobs:
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
           COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
           ZEPHYR_CYCLE_KEY: ${{ secrets.ZEPHYR_CYCLE_KEY }}
+          ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
+          ZEPHYR_ACCOUNT_ID: ${{ secrets.ZEPHYR_ACCOUNT_ID }}
         run: |
           set -euo pipefail
 
@@ -288,14 +330,22 @@ jobs:
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
 
-          # Forward a caller-supplied Zephyr cycle key only when set, so the
-          # buildspec can prefer it over the account-scoped SSM default. Appended
-          # conditionally so callers that omit it are unaffected (no empty
-          # override that would otherwise suppress the SSM fallback).
-          if [[ -n "${ZEPHYR_CYCLE_KEY:-}" ]]; then
-            ENV_VARS=$(jq -nc --arg v "$ZEPHYR_CYCLE_KEY" --argjson base "$ENV_VARS" \
-              '$base + [{"name":"ZEPHYR_CYCLE_KEY","value":$v}]')
-          fi
+          # Forward caller-supplied Zephyr settings only when set, so the buildspec
+          # can prefer them over its own defaults. Appended conditionally so
+          # callers that omit them are unaffected (no empty override that would
+          # otherwise suppress the buildspec's fallback). Useful where a caller
+          # holds these values as GitHub secrets already.
+          #
+          # NOTE for buildspec authors: assigning these unconditionally clobbers
+          # what is passed here. Prefer the inbound value:
+          #   export ZEPHYR_CYCLE_KEY="${ZEPHYR_CYCLE_KEY:-<your fallback>}"
+          for var in ZEPHYR_CYCLE_KEY ZEPHYR_API_TOKEN ZEPHYR_ACCOUNT_ID; do
+            value="${!var:-}"
+            if [[ -n "$value" ]]; then
+              ENV_VARS=$(jq -nc --arg n "$var" --arg v "$value" --argjson base "$ENV_VARS" \
+                '$base + [{"name":$n,"value":$v}]')
+            fi
+          done
 
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
