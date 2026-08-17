@@ -80,15 +80,46 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
+      # Tidying up a stale comment is cosmetic, so it must never fail the build.
+      # It used to: the response was piped straight into `jq -r '.[]...'`, and
+      # composite `run` steps get `bash -e -o pipefail`. Whenever the API
+      # answered with an error OBJECT instead of an array — a 5xx, a permissions
+      # change, a GitHub incident — `.[]` iterated its string values and jq died
+      # with `Cannot index string with string "body"`, exit 5, red job. That
+      # happened for real during the 2026-08-17 API degradation and failed three
+      # consecutive attempts on a PR whose coverage was fine.
       run: |
-        COMMENT_ID=$(curl -s -H "Authorization: token ${GH_TOKEN}" \
+        set -uo pipefail
+
+        RESPONSE=$(mktemp)
+        STATUS=$(curl -sS -o "$RESPONSE" -w '%{http_code}' \
+          -H "Authorization: token ${GH_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
           "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-          | jq -r '.[] | select(.body | contains("vitest-coverage-report-marker")) | .id' | head -1)
-        if [ -n "$COMMENT_ID" ]; then
-          curl -s -X DELETE -H "Authorization: token ${GH_TOKEN}" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}"
-          echo "Deleted previous coverage comment ($COMMENT_ID)"
+          || echo "000")
+
+        if [ "$STATUS" != "200" ]; then
+          echo "::notice::Could not list PR comments (HTTP ${STATUS}); leaving any previous coverage comment in place."
+          rm -f "$RESPONSE"
+          exit 0
         fi
+
+        # Guard the shape as well as the status: a 200 that is not an array
+        # would reintroduce exactly the original crash.
+        COMMENT_ID=$(jq -r '
+          if type == "array"
+          then .[] | select(.body // "" | contains("vitest-coverage-report-marker")) | .id
+          else empty
+          end' "$RESPONSE" 2>/dev/null | head -1)
+        rm -f "$RESPONSE"
+
+        if [ -n "$COMMENT_ID" ]; then
+          curl -sS -X DELETE -H "Authorization: token ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}" \
+            && echo "Deleted previous coverage comment ($COMMENT_ID)" \
+            || echo "::notice::Could not delete previous coverage comment ${COMMENT_ID}."
+        fi
+        exit 0
 
     - name: Report coverage on PR
       if: github.event_name == 'pull_request'
@@ -143,15 +174,49 @@ runs:
             exit 1
           fi
 
-          # Fetch changed files via curl with pagination (avoids gh CLI dependency)
+          # Fetch changed files via curl with pagination (avoids gh CLI dependency).
+          #
+          # This list IS the enforcement gate: every changed source file is
+          # checked against the threshold, so an empty list means "nothing to
+          # check" and the gate passes. That makes a silent API failure the
+          # dangerous case — it does not look like a broken check, it looks like
+          # a clean PR. So every request is status-checked and a failure is
+          # fatal. Unlike the comment cleanup above, being noisy here is the
+          # whole point: better a red job than a coverage rule that quietly
+          # stopped enforcing.
           CHANGED_FILES=""
           URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100"
+          HEADERS=$(mktemp)
+          BODY=$(mktemp)
           while [ -n "$URL" ]; do
-            RESP=$(curl -s -D /tmp/coverage-headers -H "Authorization: token ${GH_TOKEN}" "$URL")
-            CHANGED_FILES+=$(echo "$RESP" | jq -r '.[] | select(.status != "removed") | .filename')$'\n'
-            URL=$(sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' /tmp/coverage-headers)
+            STATUS=$(curl -sS -o "$BODY" -D "$HEADERS" -w '%{http_code}' \
+              -H "Authorization: token ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "$URL" || echo "000")
+
+            if [ "$STATUS" != "200" ]; then
+              echo "::error::Could not list changed files for PR #${PR_NUMBER} (HTTP ${STATUS}). Refusing to report a pass from an incomplete file list."
+              rm -f "$HEADERS" "$BODY"
+              exit 1
+            fi
+
+            if ! PAGE=$(jq -er '.[] | select(.status != "removed") | .filename' "$BODY" 2>/dev/null); then
+              # `-e` also makes an empty array non-zero; that is a legitimate
+              # empty page, not an error, so only a malformed body is fatal.
+              if ! jq -e 'type == "array"' "$BODY" > /dev/null 2>&1; then
+                echo "::error::Unexpected response listing changed files for PR #${PR_NUMBER}."
+                rm -f "$HEADERS" "$BODY"
+                exit 1
+              fi
+              PAGE=""
+            fi
+
+            if [ -n "$PAGE" ]; then
+              CHANGED_FILES+="$PAGE"$'\n'
+            fi
+            URL=$(sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' "$HEADERS")
           done
-          rm -f /tmp/coverage-headers
+          rm -f "$HEADERS" "$BODY"
 
           echo "$CHANGED_FILES" \
             | grep -E "$SOURCE_FILE_PATTERN" \
