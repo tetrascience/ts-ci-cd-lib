@@ -213,6 +213,10 @@ jobs:
           TEST_PATHS: ${{ inputs.test_paths }}
           SKIP_WHEN_UNCHANGED: ${{ inputs.skip_when_unchanged }}
           BEFORE_SHA: ${{ github.event.before }}
+          # Bound here rather than interpolated into the script below. This one
+          # is a fixed enum so it could not carry a payload, but keeping every
+          # expression out of `run:` is the rule that does not need checking.
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail -f  # -f disables glob expansion so src/** stays literal
 
@@ -237,7 +241,7 @@ jobs:
           # service_changed=false because nothing was merged here, so there is no
           # new image to wait for — the point of a dispatch is to test what is
           # already deployed.
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             echo "Manual dispatch: running the suite, no rollout expected"
             emit true false true
             exit 0
