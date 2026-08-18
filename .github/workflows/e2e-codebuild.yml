@@ -38,7 +38,7 @@ on:
         default: ""
         required: false
       service_ignore_regex:
-        description: "Anchored regex of paths known NOT to produce a new image. When set it REPLACES service_paths, and a commit counts as a service change unless every changed file matches. Prefer this over service_paths: an allowlist answers 'no new image' for any path nobody listed, which silently skips both the rollout gate and the suite for a commit that did deploy. Mirror whatever the repo's image build actually keys on (for the CFN gated flow that is reusable-cfn-gate.yml's ignore_rx)."
+        description: "Anchored regex of paths known NOT to produce a new image. When set it REPLACES service_paths AND the pattern matching in deploy_paths, since 'what builds an image' and 'what is worth deploying' are the same question; deploy_paths then only decides whether deploying is possible at all (empty = never). A commit counts as a service change unless every changed file matches. Prefer this over service_paths: an allowlist answers 'no new image' for any path nobody listed, which silently skips the rollout gate, the deploy, and the suite for a commit that did deploy. Mirror whatever the repo's image build actually keys on (for the CFN gated flow that is reusable-cfn-gate.yml's ignore_rx)."
         type: string
         default: ""
         required: false
@@ -353,9 +353,16 @@ jobs:
           fi
 
           matches "$TEST_PATHS" && TESTS=true
-          # Reuse SERVICE only when it was computed from exactly these globs.
-          # With the regex in play the two are answering different questions.
-          if [[ -z "$SERVICE_IGNORE_REGEX" && "$SERVICE_PATHS" == "$DEPLOY_PATHS" ]]; then
+          if [[ -n "$SERVICE_IGNORE_REGEX" ]]; then
+            # The regex answers both questions, because they are the same
+            # question: the files that produce a new image are exactly the files
+            # worth deploying. Keeping deploy_paths as a second, narrower
+            # definition would deploy less than it tests, so the suite would run
+            # against an environment missing the very change under test and pass.
+            # deploy_paths keeps its on/off meaning (empty = never deploy) and
+            # stops narrowing.
+            DEPLOY="$SERVICE"
+          elif [[ "$SERVICE_PATHS" == "$DEPLOY_PATHS" ]]; then
             DEPLOY="$SERVICE"
           else
             matches "$DEPLOY_PATHS" && DEPLOY=true
@@ -565,10 +572,11 @@ jobs:
             fi
             BLIND=0
 
-            # Select the container by name, falling back to the first. Indexing
-            # blindly compares a sidecar's digest the day one is added (log
-            # router, OTEL collector), which never matches and burns the full
-            # deadline reporting a rollout problem that does not exist.
+            # Select the container by name, and fail below if there is no match
+            # rather than falling back to an index. Indexing blindly compares a
+            # sidecar's digest the day one is added (log router, OTEL collector),
+            # which never matches and burns the full deadline reporting a
+            # rollout problem that does not exist.
             if ! IMAGE=$(aws ecs describe-task-definition --task-definition "$TASKDEF" \
                  --query "taskDefinition.containerDefinitions[?name=='${SERVICE}']|[0].image" --output text 2>&1); then
               # Distinguish "not permitted" from "not ready". Without this the run
