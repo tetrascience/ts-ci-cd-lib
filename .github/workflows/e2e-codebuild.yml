@@ -29,41 +29,41 @@ on:
         type: string
         required: false
       existing_deploy_branch:
-        description: "When set, skip the deploy push and instead wait for an existing deploy_workflow run on this branch. Use when CI already deploys on merge (e.g. push to development). Do NOT use for environments released from ts-cloudformation-service — there is no deploy_workflow run to wait for and the wait can never be satisfied. Use await_ecs_cluster/await_ecs_service instead."
+        description: "When set, skip the deploy push and wait for an existing deploy_workflow run on this branch. Use when CI already deploys on merge. NOT for environments released from ts-cloudformation-service, where no such run exists; use await_ecs_cluster instead."
         type: string
         required: false
       service_paths:
-        description: "Space-separated globs whose change produces a new image. Defaults to deploy_paths. Split them when an environment is released elsewhere: deploy_paths is then empty, but we still need to know whether a rollout is expected."
+        description: "Globs whose change produces a new image. Defaults to deploy_paths. Split them when the environment is released elsewhere, so deploy_paths is empty but a rollout still happens. Prefer service_ignore_regex."
         type: string
         default: ""
         required: false
       service_ignore_regex:
-        description: "Anchored regex of paths known NOT to produce a new image. When set it REPLACES service_paths AND the pattern matching in deploy_paths, since 'what builds an image' and 'what is worth deploying' are the same question; deploy_paths then only decides whether deploying is possible at all (empty = never). A commit counts as a service change unless every changed file matches. Prefer this over service_paths: an allowlist answers 'no new image' for any path nobody listed, which silently skips the rollout gate, the deploy, and the suite for a commit that did deploy. Mirror whatever the repo's image build actually keys on (for the CFN gated flow that is reusable-cfn-gate.yml's ignore_rx)."
+        description: "Anchored regex of paths known NOT to produce a new image; a commit is a service change unless every changed file matches. Replaces service_paths and the matching in deploy_paths, which then only says whether deploying is possible (empty = never). Prefer this: an allowlist answers 'no new image' for any path nobody listed. Mirror the repo's image build, i.e. reusable-cfn-gate.yml's ignore_rx."
         type: string
         default: ""
         required: false
       test_paths:
-        description: "Space-separated globs that change what the suite asserts (specs, e2e config, buildspec). Only consulted when skip_when_unchanged is true."
+        description: "Globs that change what the suite asserts. Only used when skip_when_unchanged is true."
         type: string
         default: ""
         required: false
       skip_when_unchanged:
-        description: "Skip the suite when neither service_paths nor test_paths matched. A docs or workflow only change deploys nothing, so the suite would otherwise run against whatever image the shared environment happens to hold and report a pass that is evidence for some earlier commit. Default false keeps the previous always-run behaviour."
+        description: "Skip the suite when neither service nor test paths matched, since nothing deployed and a pass would be evidence for an earlier commit. Default false keeps the previous behaviour."
         type: boolean
         default: false
         required: false
       await_ecs_cluster:
-        description: "ECS cluster holding the service under test. Set together with await_ecs_service to gate the suite on the environment actually running the image built from this commit. Cluster names are not derivable from the environment (ts-platform-development, ts-predev5-development, ts-dip-uat), so it is explicit. Requires the ECS deployment controller, since the gate reads rolloutState, which EXTERNAL and CODE_DEPLOY services do not report. Mutually exclusive with deploy_paths. Leave empty to disable the gate."
+        description: "ECS cluster holding the service under test. Set with await_ecs_service to gate the suite on the environment running the image built from this commit. Explicit because cluster names are not derivable from the environment. Requires the ECS deployment controller (the gate reads rolloutState). Mutually exclusive with deploy_paths. Empty disables the gate."
         type: string
         default: ""
         required: false
       await_ecs_service:
-        description: "ECS service to poll, which must ALSO be the name of the container in its task definition, since that is how the image under test is picked out. See await_ecs_cluster."
+        description: "ECS service to poll. Must also be the container name in its task definition, which is how the image is picked out."
         type: string
         default: ""
         required: false
       await_image_tag_prefix:
-        description: "Tag namespace written by the caller's cfn-audit-tag workflow, whose annotation carries squash_sha and image_digest. Only used when the ECS gate is enabled."
+        description: "Tag namespace from the caller's cfn-audit-tag workflow, annotated with squash_sha and image_digest. Only used when the gate is enabled."
         type: string
         default: "cfn-image"
         required: false
@@ -91,9 +91,7 @@ on:
         required: false
 
 jobs:
-  # Environment → AWS coordinates. Its own job because two jobs need the answer
-  # (the ECS gate and the suite itself) and a second inline copy of the map is
-  # how they drift apart.
+  # Its own job so the gate and the suite read one copy of the map.
   resolve-target:
     runs-on: ubuntu-latest
     outputs:
@@ -109,10 +107,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # The E2E infra (CodeBuild, OIDC role, S3 bucket) comes from
-          # infrastructure/tdp-e2e.yaml, deployed either as a substack of the TDP
-          # service stack via EnableE2E=true or as a standalone stack.
-          # Account IDs and regions are stable infrastructure facts.
+          # From infrastructure/tdp-e2e.yaml. Stable infrastructure facts.
           declare -A ACCOUNTS=(
             [predev]=611255221147
             [predev2]=383434869204
@@ -132,8 +127,7 @@ jobs:
             [uat]=us-west-2
           )
 
-          # CloudFormation Environment value used in IAM role names. Must match the
-          # tdp-e2e stack's EnvironmentName for that environment.
+          # Used in IAM role names; matches the tdp-e2e stack's EnvironmentName.
           declare -A CF_ENVIRONMENTS=(
             [preuat]=preuat
             [uat]=uat
@@ -155,9 +149,8 @@ jobs:
             echo "source_bucket=tdp-e2e-source-${ACCOUNT}"
           } >> "$GITHUB_OUTPUT"
 
-  # Classifies the diff once, for three different consumers: whether to deploy,
-  # whether a new image is expected to roll out, and whether running the suite
-  # proves anything at all.
+  # Classifies the diff once: whether to deploy, whether a rollout is coming,
+  # and whether the suite proves anything.
   check-changes:
     runs-on: ubuntu-latest
     permissions:
@@ -167,17 +160,8 @@ jobs:
       service_changed: ${{ steps.check.outputs.service_changed }}
       should_run: ${{ steps.check.outputs.should_run }}
     steps:
-      # This job used to be gated on `deploy_paths != ''`, which let the check
-      # below assume that reaching it at all was the misconfiguration. It now
-      # runs unconditionally (should_run has to be computed for callers that
-      # never deploy), so the condition it used to get from the job `if` is
-      # spelled out here instead.
-      # The two "wait until the environment runs this commit" mechanisms are
-      # mutually exclusive, and they run as sibling jobs, so a caller that set
-      # both would have `deploy` pushing a branch while `await-deploy` hunts for
-      # an audit tag that the branch-push path never creates. That fails after
-      # about six minutes with an error about a missing tag, which points
-      # nowhere near the actual mistake.
+      # Two ways to wait for a rollout, and they are mutually exclusive. Setting
+      # both deploys and hunts for an audit tag that deploy never writes.
       - name: Reject deploying and awaiting at the same time
         if: ${{ inputs.deploy_paths != '' && (inputs.await_ecs_cluster != '' || inputs.await_ecs_service != '') }}
         run: |
@@ -187,9 +171,7 @@ jobs:
           echo "::error::Pass deploy_paths:'' for environments released elsewhere."
           exit 1
 
-      # await-deploy needs both, so setting one alone does not half-enable the
-      # gate, it disables it. Silently. That is the failure this whole gate
-      # exists to stop, so it has to be an error rather than a default.
+      # await-deploy needs both, so one alone disables the gate silently.
       - name: Reject a half-configured ECS gate
         if: ${{ (inputs.await_ecs_cluster == '') != (inputs.await_ecs_service == '') }}
         env:
@@ -238,48 +220,31 @@ jobs:
         id: check
         env:
           DEPLOY_PATHS: ${{ inputs.deploy_paths }}
-          # Defaults to deploy_paths, which is what "service code" meant before
-          # the two could differ. They differ when the environment is released
-          # elsewhere: deploy_paths is empty because there is nothing for this
-          # workflow to deploy, but a rollout still happens and we still need to
-          # know whether to wait for one.
+          # Differs from deploy_paths when the environment is released elsewhere:
+          # nothing to deploy, but a rollout still happens.
           SERVICE_PATHS: ${{ inputs.service_paths || inputs.deploy_paths }}
           SERVICE_IGNORE_REGEX: ${{ inputs.service_ignore_regex }}
           TEST_PATHS: ${{ inputs.test_paths }}
           SKIP_WHEN_UNCHANGED: ${{ inputs.skip_when_unchanged }}
           BEFORE_SHA: ${{ github.event.before }}
-          # Bound here rather than interpolated into the script below. This one
-          # is a fixed enum so it could not carry a payload, but keeping every
-          # expression out of `run:` is the rule that does not need checking.
+          # Via env, not interpolated. Blanket rule, no per case judgement.
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail -f  # -f disables glob expansion so src/** stays literal
 
-          # Belt and braces: the input default above already falls back, but
-          # service_changed drives whether we wait for a rollout, and an empty
-          # pattern list matches nothing, so a lost fallback would silently
-          # answer "no new image" for every commit rather than fail.
+          # Second fallback: an empty list matches nothing, so a lost default
+          # would answer "no new image" for every commit.
           SERVICE_PATHS="${SERVICE_PATHS:-$DEPLOY_PATHS}"
 
           emit() {
             local deploy="$1" service="$2" run="$3"
 
-            # should_deploy is meaningless without deploy_paths; force it false
-            # rather than leaving the deploy job's `if` to compare against a
-            # value that was computed from an empty pattern list.
+            # Meaningless without deploy_paths.
             [[ -n "$DEPLOY_PATHS" ]] || deploy=false
 
-            # A dispatch names a ref, not a merge, so no cfn-image tag exists for
-            # this commit and the rollout gate has nothing to resolve. Force
-            # service_changed false so it skips, and run the suite regardless:
-            # dispatching IS the request to run it.
-            #
-            # should_deploy is deliberately left as the diff computed it. On a
-            # dispatch the diff base is HEAD~1, which is arbitrary, but forcing
-            # this true would push the dispatched ref over the shared
-            # environment branch on every dispatch, and forcing it false would
-            # stop deploying for callers that rely on it. Neither is ours to
-            # decide here, so the pre-existing behaviour stands.
+            # A dispatch names a ref, not a merge, so no audit tag exists to gate
+            # on. should_deploy is left as the diff computed it: forcing it
+            # either way changes behaviour for existing callers.
             if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
               service=false
               run=true
@@ -298,9 +263,7 @@ jobs:
             BASE="HEAD~1"
           fi
 
-          # An unresolvable base means we cannot tell what changed. Assume the
-          # heaviest case: deploy, expect a rollout, run the suite. Skipping any
-          # of those would trade a slow run for a result that is not evidence.
+          # Cannot tell what changed, so assume the heaviest case.
           if ! CHANGED_FILES=$(git diff --name-only "$BASE" HEAD 2>&1); then
             echo "::warning::Could not diff $BASE..HEAD, assuming service code changed"
             emit true true true
@@ -333,12 +296,8 @@ jobs:
           SERVICE=false; TESTS=false; DEPLOY=false
 
           if [[ -n "$SERVICE_IGNORE_REGEX" ]]; then
-            # Denylist, mirroring how the CFN gate decides whether to build:
-            # anything not explicitly known to be inert counts as a service
-            # change. This is the fail-safe direction and the allowlist below is
-            # not. An allowlist answers "no new image" for every path nobody
-            # thought to list, which skips the rollout gate and the suite for a
-            # commit that did in fact deploy.
+            # Denylist, mirroring the CFN gate: anything not known to be inert
+            # counts as a change. The allowlist below fails the wrong way.
             while IFS= read -r file; do
               [[ -n "$file" ]] || continue
               if ! grep -qE "$SERVICE_IGNORE_REGEX" <<< "$file"; then
@@ -354,13 +313,8 @@ jobs:
 
           matches "$TEST_PATHS" && TESTS=true
           if [[ -n "$SERVICE_IGNORE_REGEX" ]]; then
-            # The regex answers both questions, because they are the same
-            # question: the files that produce a new image are exactly the files
-            # worth deploying. Keeping deploy_paths as a second, narrower
-            # definition would deploy less than it tests, so the suite would run
-            # against an environment missing the very change under test and pass.
-            # deploy_paths keeps its on/off meaning (empty = never deploy) and
-            # stops narrowing.
+            # Same question: what builds an image is what is worth deploying.
+            # A narrower deploy_paths would deploy less than it tests.
             DEPLOY="$SERVICE"
           elif [[ "$SERVICE_PATHS" == "$DEPLOY_PATHS" ]]; then
             DEPLOY="$SERVICE"
@@ -449,19 +403,13 @@ jobs:
           gh run watch "$RUN_ID" --exit-status
           echo "Deploy completed successfully"
 
-  # The second flavour of "wait until the environment is running this commit".
-  # `deploy` above waits on a GitHub Actions run, which only works when this
-  # repo triggers the deploy. Environments released from ts-cloudformation-service
-  # have no such run: the image is built and the ts-platform bump merges before
-  # the component PR does, and an AWS pipeline rolls it out afterwards. There is
-  # nothing here to trigger or watch, so we watch the result instead.
+  # Second way to wait for a rollout. `deploy` watches a GitHub Actions run,
+  # which needs this repo to trigger the deploy; environments released from
+  # ts-cloudformation-service have none, so watch the result instead.
   #
-  # The check is identity, not timing, and that distinction is load bearing.
-  # Deployments land that no merge here caused, and an ECS circuit breaker
-  # rollback creates a FRESH deployment carrying the OLD task definition and
-  # settles to COMPLETED. Both look recent and healthy, so any time based check
-  # can pass while the environment serves the previous image. Comparing the
-  # digest cannot.
+  # Identity, not timing. Unrelated deployments land, and a circuit breaker
+  # rollback creates a fresh deployment carrying the old task definition and
+  # settles to COMPLETED. Both look recent and healthy; only the digest does not.
   await-deploy:
     needs: [resolve-target, check-changes]
     if: |
@@ -477,44 +425,34 @@ jobs:
       id-token: write
       contents: read
     steps:
-      # Credentials persist intentionally, unlike the e2e job's checkout. The
-      # audit tag is pushed by a different workflow run seconds after this one
-      # starts, so it is usually NOT present at checkout time and the step below
-      # has to fetch it. On a private repo an unauthenticated fetch fails, which
-      # would look like a missing tag and block the merge for the wrong reason.
+      # Credentials persist: the audit tag lands after checkout, so the next
+      # step has to fetch it, and an unauthenticated fetch fails on a private repo.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # zizmor: ignore[artipacked]
         with:
           fetch-depth: 0
 
-      # The caller's cfn-audit-tag workflow pushes an annotated tag naming the
-      # commit the image was built from, the commit it merged as, and the digest.
-      # It runs on the same push as this one and finishes in well under a minute,
-      # but poll rather than assume, and fail loudly if it never appears.
+      # cfn-audit-tag pushes an annotated tag carrying squash_sha and the digest,
+      # normally within 30s. Poll rather than assume, and fail loudly.
       - name: Resolve the digest this commit should be running
         id: expected
         env:
           TAG_PREFIX: ${{ inputs.await_image_tag_prefix }}
         run: |
           set -euo pipefail
-          # Wall clock, not an iteration count: each pass also does a network
-          # fetch, so counting only the sleeps understates the budget and lets
-          # this step plus the poll below overrun the job timeout, which kills
-          # the run with no ::error:: line from either.
+          # Wall clock, not iterations: each pass also fetches, so counting only
+          # the sleeps would let this plus the poll overrun the job timeout.
           TAG_DEADLINE=$(( SECONDS + 5 * 60 ))
           while (( SECONDS < TAG_DEADLINE )); do
             if ! git fetch --tags --quiet origin 2>&1; then
-              # Not fatal on its own, the tag may already be local. But if the
-              # loop later times out, this line is the difference between "the
-              # tag never appeared" and "we could not reach the remote".
+              # Not fatal, the tag may be local. Distinguishes a missing tag
+              # from an unreachable remote if the loop later times out.
               echo "::warning::git fetch --tags failed"
             fi
-            # Newest first, so if two tags ever carry the same squash_sha we
-            # resolve the most recent rather than whichever sorts first.
+            # Newest first, in case two tags carry the same squash_sha.
             for tag in $(git for-each-ref "refs/tags/$TAG_PREFIX" --sort=-creatordate --format='%(refname:strip=2)'); do
               body=$(git tag -l --format='%(contents)' "$tag")
               if grep -q "^squash_sha: ${GITHUB_SHA}$" <<< "$body"; then
-                # `|| true` because pipefail turns grep's no-match into a step
-                # abort, which would skip the diagnostic below and exit silently.
+                # || true: pipefail would abort before the diagnostic below.
                 digest=$(grep '^image_digest:' <<< "$body" | awk '{print $2}' || true)
                 if [[ -z "$digest" ]]; then
                   echo "::error::$tag names ${GITHUB_SHA} but carries no image_digest line."
@@ -551,8 +489,7 @@ jobs:
           BLIND=0
 
           while (( SECONDS < DEADLINE )); do
-            # The backticks are JMESPath literal delimiters, not command
-            # substitution, so the single quotes are required as written.
+            # Backticks are JMESPath literals, so single quotes are required.
             # shellcheck disable=SC2016
             read -r COUNT TASKDEF ROLLOUT RUNNING DESIRED <<< "$(
               aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
@@ -572,11 +509,8 @@ jobs:
             fi
             BLIND=0
 
-            # Select the container by name, and fail below if there is no match
-            # rather than falling back to an index. Indexing blindly compares a
-            # sidecar's digest the day one is added (log router, OTEL collector),
-            # which never matches and burns the full deadline reporting a
-            # rollout problem that does not exist.
+            # By name, not index: indexing compares a sidecar's digest the day
+            # one is added, and then never matches.
             if ! IMAGE=$(aws ecs describe-task-definition --task-definition "$TASKDEF" \
                  --query "taskDefinition.containerDefinitions[?name=='${SERVICE}']|[0].image" --output text 2>&1); then
               # Distinguish "not permitted" from "not ready". Without this the run
@@ -614,14 +548,9 @@ jobs:
 
   e2e:
     needs: [resolve-target, check-changes, deploy, await-deploy]
-    # !cancelled() rather than always(): always() is also true for a cancelled
-    # run, which would launch a full CodeBuild suite nobody is waiting on. Worse,
-    # callers serialise on a per-environment concurrency group with
-    # cancel-in-progress:false, so that zombie suite would hold the environment
-    # lock while the run that superseded it queues behind it.
-    #
-    # deploy and await-deploy are each skipped on the paths that do not apply,
-    # and a skipped dependency would otherwise skip this job too.
+    # !cancelled(), not always(): a cancelled run would still launch a suite and
+    # hold the caller's environment lock. deploy and await-deploy each skip on
+    # the paths that do not apply, which would otherwise skip this job too.
     if: |
       !cancelled() &&
       needs.resolve-target.result == 'success' &&
