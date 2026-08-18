@@ -192,9 +192,12 @@ jobs:
       # exists to stop, so it has to be an error rather than a default.
       - name: Reject a half-configured ECS gate
         if: ${{ (inputs.await_ecs_cluster == '') != (inputs.await_ecs_service == '') }}
+        env:
+          CLUSTER: ${{ inputs.await_ecs_cluster }}
+          SERVICE: ${{ inputs.await_ecs_service }}
         run: |
           echo "::error::await_ecs_cluster and await_ecs_service must be set together."
-          echo "::error::cluster='${{ inputs.await_ecs_cluster }}' service='${{ inputs.await_ecs_service }}'"
+          echo "::error::cluster='${CLUSTER}' service='${SERVICE}'"
           echo "::error::With only one set the rollout gate silently does not run, and the suite grades whatever image the environment already held."
           exit 1
 
