@@ -466,6 +466,9 @@ jobs:
           BLIND=0
 
           while (( SECONDS < DEADLINE )); do
+            # The backticks are JMESPath literal delimiters, not command
+            # substitution, so the single quotes are required as written.
+            # shellcheck disable=SC2016
             read -r COUNT TASKDEF ROLLOUT RUNNING DESIRED <<< "$(
               aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
                 --query 'services[0].[length(deployments),deployments[?status==`PRIMARY`]|[0].taskDefinition,deployments[?status==`PRIMARY`]|[0].rolloutState,runningCount,desiredCount]' \
@@ -498,7 +501,8 @@ jobs:
               sleep 20
               continue
             fi
-            ACTUAL=$(sed 's/.*@//' <<< "$IMAGE")
+            # repo@sha256:... -> sha256:...
+            ACTUAL="${IMAGE##*@}"
 
             if [[ "$COUNT" == "1" && "$ROLLOUT" == "COMPLETED" && "$RUNNING" == "$DESIRED" && "$ACTUAL" == "$EXPECTED" ]]; then
               echo "$CLUSTER/$SERVICE is stable on $EXPECTED"
