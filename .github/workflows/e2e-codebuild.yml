@@ -29,8 +29,38 @@ on:
         type: string
         required: false
       existing_deploy_branch:
-        description: "When set, skip the deploy push and instead wait for an existing deploy_workflow run on this branch. Use when CI already deploys on merge (e.g. push to development)."
+        description: "When set, skip the deploy push and instead wait for an existing deploy_workflow run on this branch. Use when CI already deploys on merge (e.g. push to development). Do NOT use for environments released from ts-cloudformation-service — there is no deploy_workflow run to wait for and the wait can never be satisfied. Use await_ecs_cluster/await_ecs_service instead."
         type: string
+        required: false
+      service_paths:
+        description: "Space-separated globs whose change produces a new image. Defaults to deploy_paths. Split them when an environment is released elsewhere: deploy_paths is then empty, but we still need to know whether a rollout is expected."
+        type: string
+        default: ""
+        required: false
+      test_paths:
+        description: "Space-separated globs that change what the suite asserts (specs, e2e config, buildspec). Only consulted when skip_when_unchanged is true."
+        type: string
+        default: ""
+        required: false
+      skip_when_unchanged:
+        description: "Skip the suite when neither service_paths nor test_paths matched. A docs or workflow only change deploys nothing, so the suite would otherwise run against whatever image the shared environment happens to hold and report a pass that is evidence for some earlier commit. Default false keeps the previous always-run behaviour."
+        type: boolean
+        default: false
+        required: false
+      await_ecs_cluster:
+        description: "ECS cluster holding the service under test. Set together with await_ecs_service to gate the suite on the environment actually running the image built from this commit. Cluster names are not derivable from the environment (ts-platform-development, ts-predev5-development, ts-dip-uat), so it is explicit. Leave empty to disable the gate."
+        type: string
+        default: ""
+        required: false
+      await_ecs_service:
+        description: "ECS service name to poll. See await_ecs_cluster."
+        type: string
+        default: ""
+        required: false
+      await_image_tag_prefix:
+        description: "Tag namespace written by the caller's cfn-audit-tag workflow, whose annotation carries squash_sha and image_digest. Only used when the ECS gate is enabled."
+        type: string
+        default: "cfn-image"
         required: false
       timeout_minutes:
         description: "Max minutes for the E2E job — includes buffer for setup steps"
@@ -56,18 +86,89 @@ on:
         required: false
 
 jobs:
+  # Environment → AWS coordinates. Its own job because two jobs need the answer
+  # (the ECS gate and the suite itself) and a second inline copy of the map is
+  # how they drift apart.
+  resolve-target:
+    runs-on: ubuntu-latest
+    outputs:
+      account: ${{ steps.env.outputs.account }}
+      region: ${{ steps.env.outputs.region }}
+      cf_env: ${{ steps.env.outputs.cf_env }}
+      source_bucket: ${{ steps.env.outputs.source_bucket }}
+    steps:
+      - name: Resolve environment
+        id: env
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+
+          # The E2E infra (CodeBuild, OIDC role, S3 bucket) comes from
+          # infrastructure/tdp-e2e.yaml, deployed either as a substack of the TDP
+          # service stack via EnableE2E=true or as a standalone stack.
+          # Account IDs and regions are stable infrastructure facts.
+          declare -A ACCOUNTS=(
+            [predev]=611255221147
+            [predev2]=383434869204
+            [predev3]=866984931759
+            [predev4]=456932089055
+            [predev5]=734018046548
+            [predev6]=326392129485
+            [predev7]=901926888715
+            [predev8]=581141123528
+            [dev]=706717599419
+            [preuat]=555180171822
+            [uat]=753968983172
+          )
+
+          declare -A REGIONS=(
+            [preuat]=us-west-2
+            [uat]=us-west-2
+          )
+
+          # CloudFormation Environment value used in IAM role names. Must match the
+          # tdp-e2e stack's EnvironmentName for that environment.
+          declare -A CF_ENVIRONMENTS=(
+            [preuat]=preuat
+            [uat]=uat
+          )
+
+          ACCOUNT="${ACCOUNTS[$TARGET_ENV]:-}"
+          REGION="${REGIONS[$TARGET_ENV]:-us-east-2}"
+          CF_ENV="${CF_ENVIRONMENTS[$TARGET_ENV]:-development}"
+
+          if [[ -z "$ACCOUNT" ]]; then
+            echo "::error::Unknown environment: $TARGET_ENV"
+            exit 1
+          fi
+
+          {
+            echo "account=$ACCOUNT"
+            echo "region=$REGION"
+            echo "cf_env=$CF_ENV"
+            echo "source_bucket=tdp-e2e-source-${ACCOUNT}"
+          } >> "$GITHUB_OUTPUT"
+
+  # Classifies the diff once, for three different consumers: whether to deploy,
+  # whether a new image is expected to roll out, and whether running the suite
+  # proves anything at all.
   check-changes:
-    if: ${{ inputs.deploy_paths != '' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
       should_deploy: ${{ steps.check.outputs.should_deploy }}
+      service_changed: ${{ steps.check.outputs.service_changed }}
+      should_run: ${{ steps.check.outputs.should_run }}
     steps:
-      # Runs before anything else in the job, and this job only runs when
-      # deploy_paths is non-empty — so reaching it at all with a release
-      # environment is the misconfiguration being caught.
+      # This job used to be gated on `deploy_paths != ''`, which let the check
+      # below assume that reaching it at all was the misconfiguration. It now
+      # runs unconditionally (should_run has to be computed for callers that
+      # never deploy), so the condition it used to get from the job `if` is
+      # spelled out here instead.
       - name: Reject deploy_paths for release environments
+        if: ${{ inputs.deploy_paths != '' }}
         env:
           TARGET_ENV: ${{ inputs.environment }}
         run: |
@@ -103,9 +204,45 @@ jobs:
         id: check
         env:
           DEPLOY_PATHS: ${{ inputs.deploy_paths }}
+          # Defaults to deploy_paths, which is what "service code" meant before
+          # the two could differ. They differ when the environment is released
+          # elsewhere: deploy_paths is empty because there is nothing for this
+          # workflow to deploy, but a rollout still happens and we still need to
+          # know whether to wait for one.
+          SERVICE_PATHS: ${{ inputs.service_paths || inputs.deploy_paths }}
+          TEST_PATHS: ${{ inputs.test_paths }}
+          SKIP_WHEN_UNCHANGED: ${{ inputs.skip_when_unchanged }}
           BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail -f  # -f disables glob expansion so src/** stays literal
+
+          # Belt and braces: the input default above already falls back, but
+          # service_changed drives whether we wait for a rollout, and an empty
+          # pattern list matches nothing, so a lost fallback would silently
+          # answer "no new image" for every commit rather than fail.
+          SERVICE_PATHS="${SERVICE_PATHS:-$DEPLOY_PATHS}"
+
+          emit() {
+            # should_deploy is meaningless without deploy_paths; force it false
+            # rather than leaving the deploy job's `if` to compare against a
+            # value that was computed from an empty pattern list.
+            local deploy="$1" service="$2" run="$3"
+            [[ -n "$DEPLOY_PATHS" ]] || deploy=false
+            printf 'should_deploy=%s\nservice_changed=%s\nshould_run=%s\n' \
+              "$deploy" "$service" "$run" >> "$GITHUB_OUTPUT"
+            echo "should_deploy=$deploy service_changed=$service should_run=$run"
+          }
+
+          # A dispatch is a deliberate "run it now" with no diff to reason about.
+          # service_changed=false because nothing was merged here, so there is no
+          # new image to wait for — the point of a dispatch is to test what is
+          # already deployed.
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "Manual dispatch: running the suite, no rollout expected"
+            emit true false true
+            exit 0
+          fi
+
           if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
             BASE="origin/$GITHUB_BASE_REF"
           elif [[ -n "$BEFORE_SHA" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
@@ -114,32 +251,54 @@ jobs:
             BASE="HEAD~1"
           fi
 
-          CHANGED_FILES=$(git diff --name-only "$BASE" HEAD 2>/dev/null || echo "")
+          # An unresolvable base means we cannot tell what changed. Assume the
+          # heaviest case: deploy, expect a rollout, run the suite. Skipping any
+          # of those would trade a slow run for a result that is not evidence.
+          if ! CHANGED_FILES=$(git diff --name-only "$BASE" HEAD 2>&1); then
+            echo "::warning::Could not diff $BASE..HEAD, assuming service code changed"
+            emit true true true
+            exit 0
+          fi
+
           if [[ -z "$CHANGED_FILES" ]]; then
-            echo "No changed files detected, will deploy"
-            echo "should_deploy=true" >> "$GITHUB_OUTPUT"
+            echo "No changed files detected, assuming service code changed"
+            emit true true true
             exit 0
           fi
 
           echo "Changed files:"
           echo "$CHANGED_FILES"
 
-          for pattern in $DEPLOY_PATHS; do
-            while IFS= read -r file; do
-              # Use case for glob-style matching — $pattern is intentionally unquoted
-              # shellcheck disable=SC2254
-              case "$file" in
-                $pattern)
-                  echo "Match: $file matches $pattern"
-                  echo "should_deploy=true" >> "$GITHUB_OUTPUT"
-                  exit 0
-                  ;;
-              esac
-            done <<< "$CHANGED_FILES"
-          done
+          matches() {
+            [[ -n "$1" ]] || return 1
+            for pattern in $1; do
+              while IFS= read -r file; do
+                # Use case for glob-style matching — $pattern is intentionally unquoted
+                # shellcheck disable=SC2254
+                case "$file" in
+                  $pattern) echo "Match: $file matches $pattern"; return 0 ;;
+                esac
+              done <<< "$CHANGED_FILES"
+            done
+            return 1
+          }
 
-          echo "No service code changes — skipping deploy"
-          echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+          SERVICE=false; TESTS=false; DEPLOY=false
+          matches "$SERVICE_PATHS" && SERVICE=true
+          matches "$TEST_PATHS" && TESTS=true
+          if [[ "$SERVICE_PATHS" == "$DEPLOY_PATHS" ]]; then
+            DEPLOY="$SERVICE"
+          else
+            matches "$DEPLOY_PATHS" && DEPLOY=true
+          fi
+
+          RUN=true
+          if [[ "$SKIP_WHEN_UNCHANGED" == "true" && "$SERVICE" == "false" && "$TESTS" == "false" ]]; then
+            echo "Neither service code nor tests changed, nothing for the suite to prove"
+            RUN=false
+          fi
+
+          emit "$DEPLOY" "$SERVICE" "$RUN"
 
   deploy:
     needs: check-changes
@@ -214,13 +373,163 @@ jobs:
           gh run watch "$RUN_ID" --exit-status
           echo "Deploy completed successfully"
 
+  # The second flavour of "wait until the environment is running this commit".
+  # `deploy` above waits on a GitHub Actions run, which only works when this
+  # repo triggers the deploy. Environments released from ts-cloudformation-service
+  # have no such run: the image is built and the ts-platform bump merges before
+  # the component PR does, and an AWS pipeline rolls it out afterwards. There is
+  # nothing here to trigger or watch, so we watch the result instead.
+  #
+  # The check is identity, not timing, and that distinction is load bearing.
+  # Deployments land that no merge here caused, and an ECS circuit breaker
+  # rollback creates a FRESH deployment carrying the OLD task definition and
+  # settles to COMPLETED. Both look recent and healthy, so any time based check
+  # can pass while the environment serves the previous image. Comparing the
+  # digest cannot.
+  await-deploy:
+    needs: [resolve-target, check-changes]
+    if: |
+      !cancelled() &&
+      needs.resolve-target.result == 'success' &&
+      needs.check-changes.result == 'success' &&
+      inputs.await_ecs_cluster != '' &&
+      inputs.await_ecs_service != '' &&
+      needs.check-changes.outputs.service_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      # Credentials persist intentionally, unlike the e2e job's checkout. The
+      # audit tag is pushed by a different workflow run seconds after this one
+      # starts, so it is usually NOT present at checkout time and the step below
+      # has to fetch it. On a private repo an unauthenticated fetch fails, which
+      # would look like a missing tag and block the merge for the wrong reason.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # zizmor: ignore[artipacked]
+        with:
+          fetch-depth: 0
+
+      # The caller's cfn-audit-tag workflow pushes an annotated tag naming the
+      # commit the image was built from, the commit it merged as, and the digest.
+      # It runs on the same push as this one and finishes in well under a minute,
+      # but poll rather than assume, and fail loudly if it never appears.
+      - name: Resolve the digest this commit should be running
+        id: expected
+        env:
+          TAG_PREFIX: ${{ inputs.await_image_tag_prefix }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 20); do
+            if ! git fetch --tags --quiet origin 2>&1; then
+              # Not fatal on its own, the tag may already be local. But if the
+              # loop later times out, this line is the difference between "the
+              # tag never appeared" and "we could not reach the remote".
+              echo "::warning::git fetch --tags failed on attempt $attempt"
+            fi
+            for tag in $(git for-each-ref "refs/tags/$TAG_PREFIX" --format='%(refname:strip=2)'); do
+              body=$(git tag -l --format='%(contents)' "$tag")
+              if grep -q "^squash_sha: ${GITHUB_SHA}$" <<< "$body"; then
+                digest=$(grep '^image_digest:' <<< "$body" | awk '{print $2}')
+                if [[ -z "$digest" ]]; then
+                  echo "::error::$tag has no image_digest"
+                  exit 1
+                fi
+                echo "$tag -> $digest"
+                echo "digest=$digest" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            done
+            echo "no $TAG_PREFIX tag for ${GITHUB_SHA} yet, waiting"
+            sleep 15
+          done
+          echo "::error::No $TAG_PREFIX tag names ${GITHUB_SHA} as its squash_sha after 5 minutes."
+          echo "::error::Without it there is no way to know which image this commit should be running."
+          exit 1
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          aws-region: ${{ needs.resolve-target.outputs.region }}
+          role-to-assume: arn:aws:iam::${{ needs.resolve-target.outputs.account }}:role/gha-tdp-e2e-${{ needs.resolve-target.outputs.cf_env }}
+          role-session-name: e2e-await-deploy
+          role-skip-session-tagging: true
+
+      - name: Wait for the environment to be running exactly that image
+        env:
+          CLUSTER: ${{ inputs.await_ecs_cluster }}
+          SERVICE: ${{ inputs.await_ecs_service }}
+          EXPECTED: ${{ steps.expected.outputs.digest }}
+        run: |
+          set -euo pipefail
+          DEADLINE=$(( SECONDS + 20 * 60 ))
+          BLIND=0
+
+          while (( SECONDS < DEADLINE )); do
+            read -r COUNT TASKDEF ROLLOUT RUNNING DESIRED <<< "$(
+              aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+                --query 'services[0].[length(deployments),deployments[?status==`PRIMARY`]|[0].taskDefinition,deployments[?status==`PRIMARY`]|[0].rolloutState,runningCount,desiredCount]' \
+                --output text
+            )" || true
+
+            if [[ -z "${TASKDEF:-}" || "$TASKDEF" == "None" ]]; then
+              BLIND=$(( BLIND + 1 ))
+              # Distinguish "cannot see the service" from "service is not ready".
+              if (( BLIND >= 10 )); then
+                echo "::error::describe-services returned nothing $BLIND times for $CLUSTER/$SERVICE; this is an access or naming problem, not a slow rollout."
+                exit 1
+              fi
+              sleep 20
+              continue
+            fi
+            BLIND=0
+
+            if ! IMAGE=$(aws ecs describe-task-definition --task-definition "$TASKDEF" \
+                 --query 'taskDefinition.containerDefinitions[0].image' --output text 2>&1); then
+              # Distinguish "not permitted" from "not ready". Without this the run
+              # waits the full 20 minutes and reports a rollout problem when the
+              # real answer is that the IAM grant has not reached this account.
+              if grep -qi 'AccessDenied\|not authorized' <<< "$IMAGE"; then
+                echo "::error::Denied ecs:DescribeTaskDefinition in this account."
+                echo "::error::The grant in infrastructure/tdp-e2e.yaml has not reached it yet."
+                exit 1
+              fi
+              echo "describe-task-definition failed transiently, retrying"
+              sleep 20
+              continue
+            fi
+            ACTUAL=$(sed 's/.*@//' <<< "$IMAGE")
+
+            if [[ "$COUNT" == "1" && "$ROLLOUT" == "COMPLETED" && "$RUNNING" == "$DESIRED" && "$ACTUAL" == "$EXPECTED" ]]; then
+              echo "$CLUSTER/$SERVICE is stable on $EXPECTED"
+              exit 0
+            fi
+
+            echo "waiting: deployments=$COUNT rollout=$ROLLOUT running=$RUNNING/$DESIRED digest=${ACTUAL:-unknown}"
+            sleep 20
+          done
+
+          echo "::error::$CLUSTER/$SERVICE is not running $EXPECTED after 20 minutes."
+          echo "::error::Refusing to run the suite, because a pass would not be evidence for this commit."
+          exit 1
 
   e2e:
-    needs: [check-changes, deploy]
+    needs: [resolve-target, check-changes, deploy, await-deploy]
+    # !cancelled() rather than always(): always() is also true for a cancelled
+    # run, which would launch a full CodeBuild suite nobody is waiting on. Worse,
+    # callers serialise on a per-environment concurrency group with
+    # cancel-in-progress:false, so that zombie suite would hold the environment
+    # lock while the run that superseded it queues behind it.
+    #
+    # deploy and await-deploy are each skipped on the paths that do not apply,
+    # and a skipped dependency would otherwise skip this job too.
     if: |
-      always() &&
+      !cancelled() &&
+      needs.resolve-target.result == 'success' &&
       (needs.deploy.result == 'success' || needs.deploy.result == 'skipped') &&
-      (needs.check-changes.result == 'success' || needs.check-changes.result == 'skipped')
+      (needs.await-deploy.result == 'success' || needs.await-deploy.result == 'skipped') &&
+      (needs.check-changes.result == 'success' || needs.check-changes.result == 'skipped') &&
+      needs.check-changes.outputs.should_run != 'false'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
     permissions:
@@ -232,66 +541,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Resolve environment
-        id: env
-        env:
-          TARGET_ENV: ${{ inputs.environment }}
-        run: |
-          set -euo pipefail
-
-          # Environment → AWS account mapping.
-          # The E2E infra (CodeBuild, OIDC role, S3 bucket) comes from
-          # infrastructure/tdp-e2e.yaml, deployed either as a substack of the TDP
-          # service stack via EnableE2E=true or as a standalone stack.
-          # Account IDs and regions are stable infrastructure facts.
-          declare -A ACCOUNTS=(
-            [predev]=611255221147
-            [predev2]=383434869204
-            [predev3]=866984931759
-            [predev4]=456932089055
-            [predev5]=734018046548
-            [predev6]=326392129485
-            [predev7]=901926888715
-            [predev8]=581141123528
-            [dev]=706717599419
-            [preuat]=555180171822
-            [uat]=753968983172
-          )
-
-          declare -A REGIONS=(
-            [preuat]=us-west-2
-            [uat]=us-west-2
-          )
-
-          # CloudFormation Environment value used in IAM role names. Must match the
-          # tdp-e2e stack's EnvironmentName for that environment.
-          declare -A CF_ENVIRONMENTS=(
-            [preuat]=preuat
-            [uat]=uat
-          )
-
-          ACCOUNT="${ACCOUNTS[$TARGET_ENV]:-}"
-          REGION="${REGIONS[$TARGET_ENV]:-us-east-2}"
-          CF_ENV="${CF_ENVIRONMENTS[$TARGET_ENV]:-development}"
-
-          if [[ -z "$ACCOUNT" ]]; then
-            echo "::error::Unknown environment: $TARGET_ENV"
-            exit 1
-          fi
-
-          {
-            echo "env=$TARGET_ENV"
-            echo "account=$ACCOUNT"
-            echo "region=$REGION"
-            echo "cf_env=$CF_ENV"
-            echo "source_bucket=tdp-e2e-source-${ACCOUNT}"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
-          aws-region: ${{ steps.env.outputs.region }}
-          role-to-assume: arn:aws:iam::${{ steps.env.outputs.account }}:role/gha-tdp-e2e-${{ steps.env.outputs.cf_env }}
+          aws-region: ${{ needs.resolve-target.outputs.region }}
+          role-to-assume: arn:aws:iam::${{ needs.resolve-target.outputs.account }}:role/gha-tdp-e2e-${{ needs.resolve-target.outputs.cf_env }}
           role-session-name: e2e-codebuild
           role-skip-session-tagging: true
 
@@ -300,7 +554,7 @@ jobs:
         env:
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           REPO_NAME: ${{ github.repository }}
-          SOURCE_BUCKET: ${{ steps.env.outputs.source_bucket }}
+          SOURCE_BUCKET: ${{ needs.resolve-target.outputs.source_bucket }}
         run: |
           set -euo pipefail
           S3_KEY="${REPO_NAME}/${COMMIT_SHA}.zip"
