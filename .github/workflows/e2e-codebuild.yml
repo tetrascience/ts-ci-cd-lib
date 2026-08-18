@@ -179,12 +179,23 @@ jobs:
       # about six minutes with an error about a missing tag, which points
       # nowhere near the actual mistake.
       - name: Reject deploying and awaiting at the same time
-        if: ${{ inputs.deploy_paths != '' && inputs.await_ecs_cluster != '' }}
+        if: ${{ inputs.deploy_paths != '' && (inputs.await_ecs_cluster != '' || inputs.await_ecs_service != '') }}
         run: |
-          echo "::error::deploy_paths and await_ecs_cluster are mutually exclusive."
+          echo "::error::deploy_paths and the await_ecs_* inputs are mutually exclusive."
           echo "::error::deploy_paths means this workflow deploys the environment and waits for its own deploy run."
-          echo "::error::await_ecs_cluster means something else releases it and we wait for the image to land."
+          echo "::error::await_ecs_* means something else releases it and we wait for the image to land."
           echo "::error::Pass deploy_paths:'' for environments released elsewhere."
+          exit 1
+
+      # await-deploy needs both, so setting one alone does not half-enable the
+      # gate, it disables it. Silently. That is the failure this whole gate
+      # exists to stop, so it has to be an error rather than a default.
+      - name: Reject a half-configured ECS gate
+        if: ${{ (inputs.await_ecs_cluster == '') != (inputs.await_ecs_service == '') }}
+        run: |
+          echo "::error::await_ecs_cluster and await_ecs_service must be set together."
+          echo "::error::cluster='${{ inputs.await_ecs_cluster }}' service='${{ inputs.await_ecs_service }}'"
+          echo "::error::With only one set the rollout gate silently does not run, and the suite grades whatever image the environment already held."
           exit 1
 
       - name: Reject deploy_paths for release environments
