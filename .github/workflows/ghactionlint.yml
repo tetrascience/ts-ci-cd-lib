@@ -34,8 +34,22 @@ jobs:
         shell: bash
         env:
           ACTIONLINT_VERSION: ${{ inputs.actionlint_version }}
-        # Pinned to v1.7.12 commit SHA — tags can be force-pushed
-        run: bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash) "$ACTIONLINT_VERSION"
+        # Pinned to v1.7.12 commit SHA — tags can be force-pushed.
+        # Fetched to a file rather than piped into bash: raw.githubusercontent
+        # answers 429 under load, and `bash <(curl -s ...)` then EXECUTES the
+        # rate-limit prose, failing as `line 2: syntax error near ('`.
+        run: |
+          set -euo pipefail
+          url=https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 5 -o download-actionlint.bash "$url"
+          # Guard the body too: -f covers an HTTP error status, not a 200 that
+          # returns something other than the script.
+          if ! head -1 download-actionlint.bash | grep -q '^#!'; then
+            echo "::error::Not a script — first bytes: $(head -c 200 download-actionlint.bash)"
+            exit 1
+          fi
+          bash download-actionlint.bash "$ACTIONLINT_VERSION"
+          rm -f download-actionlint.bash
 
       - name: Run actionlint
         run: ./actionlint -color
