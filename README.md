@@ -294,6 +294,7 @@ phases:
 | `image_override` | No | | Override CodeBuild image |
 | `compute_type_override` | No | | Override CodeBuild compute (e.g. `BUILD_GENERAL1_MEDIUM`) |
 | `timeout_minutes` | No | `25` | Max minutes for the E2E job |
+| `passthrough_env` | No | | Extra **non-secret** env vars for the run, one `NAME=VALUE` per line. See below. |
 
 #### Secrets
 
@@ -305,10 +306,36 @@ phases:
 | `ZEPHYR_CYCLE_KEY` | No | Cycle to record into |
 | `ZEPHYR_API_TOKEN` | No | Zephyr Scale API token |
 | `ZEPHYR_ACCOUNT_ID` | No | Jira account id for `executedById` |
+| `E2E_USER_PASSWORD` | No | Password for a dedicated e2e login user, masked and forwarded to the run. |
 
-The three Zephyr secrets are forwarded as CodeBuild environment variables **only when
-non-empty**, so omitting them leaves the buildspec's own lookups in charge. Pass them
-when the caller already holds these values as GitHub secrets.
+The Zephyr secrets and `E2E_USER_PASSWORD` are forwarded as CodeBuild environment variables
+**only when non-empty**, so omitting them leaves the buildspec's own lookups in charge. Pass
+them when the caller already holds these values as GitHub secrets.
+
+#### Passing per-environment config (`passthrough_env`)
+
+The suite runs inside CodeBuild, so **GitHub Environment `vars` do not reach the test process
+on their own** — only what this workflow forwards does. Use `passthrough_env` to inject
+non-secret, per-environment values (org slug, e2e user email, victim org, fixture overrides)
+without changing this workflow each time a suite needs a new one:
+
+```yaml
+with:
+  environment: uat
+  deploy_paths: ''
+  buildspec: buildspec.e2e.yml
+  passthrough_env: |
+    E2E_USER_EMAIL=${{ vars.E2E_USER_EMAIL }}
+    E2E_ORG_SLUG=${{ vars.E2E_ORG_SLUG }}
+    E2E_VICTIM_ORG_SLUG=${{ vars.E2E_VICTIM_ORG_SLUG }}
+secrets:
+  E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
+```
+
+Rules: one `NAME=VALUE` per line, blanks ignored, everything after the first `=` is the value.
+**Never put secrets here** — `with:` inputs are not masked in logs. Secrets go through declared
+`secrets:` inputs (that is why the password is separate). Unset caller `vars` interpolate to an
+empty value; have the suite treat blank as unset.
 
 > **Buildspec authors:** a buildspec that assigns these unconditionally will clobber
 > what the workflow passes. Prefer the inbound value:
