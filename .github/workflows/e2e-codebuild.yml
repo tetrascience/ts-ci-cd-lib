@@ -338,24 +338,39 @@ jobs:
         run: |
           set -euo pipefail
 
-          ENV_VARS=$(jq -nc '[
-            {"name":"E2E_ENVIRONMENT","value":env.TARGET_ENV},
-            {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
-            {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
-          ]')
+          ENV_VARS='[]'
 
           # Non-secret vars from passthrough_env, one NAME=VALUE per line. Blank
-          # lines are ignored; everything after the first "=" is the value.
+          # lines are ignored; everything after the first "=" is the value, and
+          # surrounding whitespace on name and value is trimmed. Appended FIRST so
+          # the reserved vars below always win on a name collision (see the dedupe
+          # at the end). An invalid name fails fast with a clear message.
           while IFS= read -r line; do
-            line="${line#"${line%%[![:space:]]*}"}"   # ltrim
+            line="${line#"${line%%[![:space:]]*}"}"
             [[ -z "$line" || "$line" != *"="* ]] && continue
             name="${line%%=*}"
             value="${line#*=}"
             name="${name//[[:space:]]/}"
+            value="${value#"${value%%[![:space:]]*}"}"        # ltrim value
+            value="${value%"${value##*[![:space:]]}"}"        # rtrim value
             [[ -z "$name" ]] && continue
+            if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo "::error::passthrough_env has an invalid variable name: '$name'"
+              exit 1
+            fi
             ENV_VARS=$(jq -nc --arg n "$name" --arg v "$value" --argjson base "$ENV_VARS" \
               '$base + [{"name":$n,"value":$v}]')
           done <<< "${PASSTHROUGH_ENV:-}"
+
+          # Reserved vars this workflow controls. Appended AFTER passthrough so a
+          # caller cannot accidentally shadow them.
+          ENV_VARS=$(jq -nc --argjson base "$ENV_VARS" \
+            --arg env "$TARGET_ENV" --arg url "$JFROG_URL" --arg auth "$JFROG_AUTH" \
+            '$base + [
+              {"name":"E2E_ENVIRONMENT","value":$env},
+              {"name":"JFROG_ARTIFACTORY_URL","value":$url},
+              {"name":"JFROG_ARTIFACTORY_AUTH","value":$auth}
+            ]')
 
           # Login password, forwarded only when set. Masked (arrives as a secret).
           if [[ -n "${E2E_USER_PASSWORD:-}" ]]; then
@@ -363,11 +378,8 @@ jobs:
               '$base + [{"name":"E2E_USER_PASSWORD","value":$v}]')
           fi
 
-          # Forward caller-supplied Zephyr settings only when set, so the buildspec
-          # can prefer them over its own defaults. Appended conditionally so
-          # callers that omit them are unaffected (no empty override that would
-          # otherwise suppress the buildspec's fallback). Useful where a caller
-          # holds these values as GitHub secrets already.
+          # Caller-supplied Zephyr settings, forwarded only when set so the
+          # buildspec can prefer them over its own defaults.
           #
           # NOTE for buildspec authors: assigning these unconditionally clobbers
           # what is passed here. Prefer the inbound value:
@@ -379,6 +391,12 @@ jobs:
                 '$base + [{"name":$n,"value":$v}]')
             fi
           done
+
+          # De-dupe last-wins: two entries with the same name make start-build
+          # reject the whole request. Reserved vars are appended after passthrough,
+          # so they win any collision. Order is irrelevant to CodeBuild.
+          ENV_VARS=$(jq -c 'reduce .[] as $e ({}; .[$e.name] = $e.value)
+            | to_entries | map({name: .key, value: .value})' <<< "$ENV_VARS")
 
           CMD=(aws codebuild start-build
             --project-name tdp-e2e

@@ -312,6 +312,11 @@ The Zephyr secrets and `E2E_USER_PASSWORD` are forwarded as CodeBuild environmen
 **only when non-empty**, so omitting them leaves the buildspec's own lookups in charge. Pass
 them when the caller already holds these values as GitHub secrets.
 
+Note on `E2E_USER_PASSWORD`: it is masked in the GitHub Actions log, but it is forwarded as a
+plaintext CodeBuild environment override, so it appears in cleartext in the target account's
+CloudTrail `StartBuild` request and on the build's environment in the CodeBuild console. Use a
+dedicated low-privilege e2e user, not a shared credential.
+
 #### Passing per-environment config (`passthrough_env`)
 
 The suite runs inside CodeBuild, so **GitHub Environment `vars` do not reach the test process
