@@ -315,7 +315,7 @@ them when the caller already holds these values as GitHub secrets.
 #### Passing per-environment config (`passthrough_env`)
 
 The suite runs inside CodeBuild, so **GitHub Environment `vars` do not reach the test process
-on their own** — only what this workflow forwards does. Use `passthrough_env` to inject
+on their own; only what this workflow forwards does. Use `passthrough_env` to inject
 non-secret, per-environment values (org slug, e2e user email, victim org, fixture overrides)
 without changing this workflow each time a suite needs a new one:
 
@@ -333,7 +333,7 @@ secrets:
 ```
 
 Rules: one `NAME=VALUE` per line, blanks ignored, everything after the first `=` is the value.
-**Never put secrets here** — `with:` inputs are not masked in logs. Secrets go through declared
+**Never put secrets here.** `with:` inputs are not masked in logs. Secrets go through declared
 `secrets:` inputs (that is why the password is separate). Unset caller `vars` interpolate to an
 empty value; have the suite treat blank as unset.
 

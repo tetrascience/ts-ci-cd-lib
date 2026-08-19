@@ -39,11 +39,10 @@ on:
         required: false
       passthrough_env:
         description: |
-          Extra NON-SECRET env vars to inject into the CodeBuild run, one NAME=VALUE
-          per line. The caller resolves the values (typically from GitHub Environment
-          `vars`), so new per-env config never needs a change to this workflow. Do NOT
-          put secrets here — `with:` inputs are not masked in logs. Secrets go through
-          declared `secrets:` inputs instead (see E2E_USER_PASSWORD).
+          Non-secret env vars for the CodeBuild run, one NAME=VALUE per line.
+          Lets a caller forward GitHub Environment vars without changing this
+          workflow. Not for secrets: `with:` inputs are unmasked. Use secrets
+          inputs for those (see E2E_USER_PASSWORD).
         type: string
         default: ""
         required: false
@@ -65,7 +64,7 @@ on:
         description: "Optional Jira account id used for Zephyr executedById. Same precedence as ZEPHYR_CYCLE_KEY."
         required: false
       E2E_USER_PASSWORD:
-        description: "Optional password for a dedicated e2e login user. Masked. Forwarded into the CodeBuild run as E2E_USER_PASSWORD so security suites can authenticate as a real single-org user instead of minting a token. The matching E2E_USER_EMAIL is a non-secret var passed via passthrough_env."
+        description: "Optional password for a dedicated e2e login user, masked and forwarded into the run. Lets security suites log in as a real single-org user instead of minting. The email is non-secret and rides passthrough_env."
         required: false
 
 jobs:
@@ -345,11 +344,8 @@ jobs:
             {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
           ]')
 
-          # Caller-supplied non-secret vars (passthrough_env), one NAME=VALUE per
-          # line. Lets a repo forward GitHub Environment `vars` (org slug, e2e user
-          # email, victim org, fixture overrides) into the run without a change to
-          # this workflow. Blank lines and leading/trailing whitespace are ignored;
-          # everything after the first "=" is the value (so values may contain "=").
+          # Non-secret vars from passthrough_env, one NAME=VALUE per line. Blank
+          # lines are ignored; everything after the first "=" is the value.
           while IFS= read -r line; do
             line="${line#"${line%%[![:space:]]*}"}"   # ltrim
             [[ -z "$line" || "$line" != *"="* ]] && continue
@@ -361,9 +357,7 @@ jobs:
               '$base + [{"name":$n,"value":$v}]')
           done <<< "${PASSTHROUGH_ENV:-}"
 
-          # Named secret: the e2e login password. Forwarded only when set so callers
-          # that omit it are unaffected. Masked because it arrives as a secret, not
-          # an input. (E2E_USER_EMAIL is non-secret and travels via passthrough_env.)
+          # Login password, forwarded only when set. Masked (arrives as a secret).
           if [[ -n "${E2E_USER_PASSWORD:-}" ]]; then
             ENV_VARS=$(jq -nc --arg v "$E2E_USER_PASSWORD" --argjson base "$ENV_VARS" \
               '$base + [{"name":"E2E_USER_PASSWORD","value":$v}]')
