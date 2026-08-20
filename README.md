@@ -307,7 +307,7 @@ phases:
 | `ZEPHYR_CYCLE_KEY` | No | Cycle to record into |
 | `ZEPHYR_API_TOKEN` | No | Zephyr Scale API token |
 | `ZEPHYR_ACCOUNT_ID` | No | Jira account id for `executedById` |
-| `E2E_USER_PASSWORD` | No | Password for a dedicated e2e login user, masked and forwarded to the run. |
+| `E2E_USER_PASSWORD` | No | Password for a dedicated e2e login user. Masked in the Actions log; reaches CodeBuild as a plaintext env override (see the note below). |
 
 The Zephyr secrets and `E2E_USER_PASSWORD` are forwarded as CodeBuild environment variables
 **only when non-empty**, so omitting them leaves the buildspec's own lookups in charge. Pass
@@ -325,9 +325,12 @@ their own; only what this workflow forwards does. There are two ways to forward 
 compose.
 
 **`gh_environment` (recommended for per-environment config).** Set it to a GitHub Environment
-name. The e2e job then runs in that Environment and forwards **every `E2E_*` variable** defined
-on it into the run, with no per-variable wiring here. Add a new `E2E_*` var to the Environment
-and it flows through automatically. A `uses:` caller cannot read Environment `vars` itself, which
+name. The e2e job then runs in that Environment and forwards **every non-empty `E2E_*` variable
+visible to the job** (org, repo, and the selected Environment, with the Environment winning) into
+the run, with no per-variable wiring here. Add a new `E2E_*` var and it flows through
+automatically. When `gh_environment` is unset nothing is forwarded, so callers that do not opt in
+are unchanged. `E2E_USER_PASSWORD` is never forwarded as a variable even if set as one; it travels
+only through the masked secret input. A `uses:` caller cannot read Environment `vars` itself, which
 is why this reads them inside the job.
 
 ```yaml
@@ -335,7 +338,7 @@ with:
   environment: uat
   deploy_paths: ''
   buildspec: buildspec.e2e.yml
-  gh_environment: uat        # forwards every E2E_* var set on the uat Environment
+  gh_environment: uat        # forwards every E2E_* var visible to the job
 secrets:
   # a repo or org secret; Environment secrets do not reach a reusable workflow
   E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}

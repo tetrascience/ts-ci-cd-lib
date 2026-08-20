@@ -47,14 +47,14 @@ on:
         required: false
       gh_environment:
         description: |
-          GitHub Environment whose vars/secrets to source e2e config from. When
-          set, the e2e job runs in this Environment and reads a known set of E2E_*
-          vars (E2E_USER_EMAIL, E2E_ORG_SLUG, E2E_VICTIM_ORG_SLUG,
-          E2E_VICTIM_DATA_APP_ID, fixture overrides, E2E_REQUIRE_SECURITY) and
-          forwards the non-empty ones into the run. This is how per-environment NON-SECRET
-          config reaches CodeBuild, since a `uses:` caller cannot attach to an
-          Environment. Environment SECRETS do not reach a reusable workflow, so the
-          password comes from the E2E_USER_PASSWORD secret input (repo/org secret).
+          GitHub Environment to source non-secret e2e config from. When set, the
+          e2e job runs in this Environment and forwards every non-empty E2E_* var
+          visible to the job (org, repo, and this Environment, with the Environment
+          winning) into the run. When unset nothing is forwarded, so callers that
+          do not opt in are unchanged. This is how per-environment non-secret config
+          reaches CodeBuild, since a `uses:` caller cannot attach to an Environment.
+          Environment SECRETS do not reach a reusable workflow, so the password
+          comes from the E2E_USER_PASSWORD secret input (a repo or org secret).
         type: string
         default: ""
         required: false
@@ -76,7 +76,7 @@ on:
         description: "Optional Jira account id used for Zephyr executedById. Same precedence as ZEPHYR_CYCLE_KEY."
         required: false
       E2E_USER_PASSWORD:
-        description: "Optional password for a dedicated e2e login user, masked and forwarded when set. Must be a repo or org secret: GitHub Environment secrets do not reach a reusable workflow (only its vars do, via gh_environment)."
+        description: "Optional password for a dedicated e2e login user. Masked in the Actions log only; it reaches CodeBuild as a plaintext env override (see the README note), so use a dedicated low-privilege user. Must be a repo or org secret: Environment secrets do not reach a reusable workflow (only its vars do, via gh_environment)."
         required: false
 
 jobs:
@@ -349,11 +349,12 @@ jobs:
           ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
           ZEPHYR_ACCOUNT_ID: ${{ secrets.ZEPHYR_ACCOUNT_ID }}
           PASSTHROUGH_ENV: ${{ inputs.passthrough_env }}
-          # All Environment (gh_environment) vars as JSON; the E2E_* ones are
-          # forwarded in the script below. Read in this job because only a job in
-          # the Environment sees its vars, and a `uses:` caller cannot. An empty
-          # object when the job is not in an Environment, so this is backward compatible.
-          ENV_VARS_JSON: ${{ toJSON(vars) }}
+          # E2E_* config visible to the job (org, repo, and the selected
+          # Environment, the Environment winning) as JSON; the script forwards it
+          # below. Only populated when gh_environment is set, so callers that do
+          # not opt into an Environment forward nothing, as before. Read in this
+          # job because a `uses:` caller cannot see Environment vars.
+          ENV_VARS_JSON: ${{ inputs.gh_environment != '' && toJSON(vars) || '{}' }}
           E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
         run: |
           set -euo pipefail
@@ -370,7 +371,8 @@ jobs:
             [[ -z "$line" || "$line" != *"="* ]] && continue
             name="${line%%=*}"
             value="${line#*=}"
-            name="${name//[[:space:]]/}"
+            name="${name#"${name%%[![:space:]]*}"}"          # ltrim name
+            name="${name%"${name##*[![:space:]]}"}"          # rtrim name
             value="${value#"${value%%[![:space:]]*}"}"        # ltrim value
             value="${value%"${value##*[![:space:]]}"}"        # rtrim value
             [[ -z "$name" ]] && continue
@@ -382,14 +384,17 @@ jobs:
               '$base + [{"name":$n,"value":$v}]')
           done <<< "${PASSTHROUGH_ENV:-}"
 
-          # Every E2E_* var from the Environment, forwarded as-is and only when
-          # non-empty. New E2E_* vars flow through with no edit here. Appended
-          # before the reserved vars so those still win a name collision.
+          # Every non-empty E2E_* var visible to the job, forwarded as-is; new
+          # E2E_* vars flow through with no edit here. Excludes E2E_USER_PASSWORD
+          # so the password only ever travels the masked secret path below, never
+          # as an unmasked variable. Appended before the reserved vars so those
+          # still win a name collision.
           VARS_JSON="${ENV_VARS_JSON:-}"
           [[ -z "$VARS_JSON" ]] && VARS_JSON='{}'
           ENV_VARS=$(jq -nc --argjson base "$ENV_VARS" --argjson vars "$VARS_JSON" '
             $base + [ $vars | to_entries[]
-              | select(.key | startswith("E2E_")) | select(.value != "")
+              | select(.key | startswith("E2E_")) | select(.key != "E2E_USER_PASSWORD")
+              | select(.value != "")
               | {name: .key, value: .value} ]')
 
           # Reserved vars this workflow controls. Appended after passthrough and
