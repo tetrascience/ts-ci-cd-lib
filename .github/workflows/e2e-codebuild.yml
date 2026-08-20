@@ -50,10 +50,11 @@ on:
           GitHub Environment whose vars/secrets to source e2e config from. When
           set, the e2e job runs in this Environment and reads a known set of E2E_*
           vars (E2E_USER_EMAIL, E2E_ORG_SLUG, E2E_VICTIM_ORG_SLUG,
-          E2E_VICTIM_DATA_APP_ID, fixture overrides, E2E_REQUIRE_SECURITY) plus the
-          E2E_USER_PASSWORD secret, forwarding the non-empty ones into the run.
-          This is how per-environment credentials reach CodeBuild, since a `uses:`
-          caller cannot attach to an Environment itself.
+          E2E_VICTIM_DATA_APP_ID, fixture overrides, E2E_REQUIRE_SECURITY) and
+          forwards the non-empty ones into the run. This is how per-environment NON-SECRET
+          config reaches CodeBuild, since a `uses:` caller cannot attach to an
+          Environment. Environment SECRETS do not reach a reusable workflow, so the
+          password comes from the E2E_USER_PASSWORD secret input (repo/org secret).
         type: string
         default: ""
         required: false
@@ -73,6 +74,9 @@ on:
         required: false
       ZEPHYR_ACCOUNT_ID:
         description: "Optional Jira account id used for Zephyr executedById. Same precedence as ZEPHYR_CYCLE_KEY."
+        required: false
+      E2E_USER_PASSWORD:
+        description: "Optional password for a dedicated e2e login user, masked and forwarded when set. Must be a repo or org secret: GitHub Environment secrets do not reach a reusable workflow (only its vars do, via gh_environment)."
         required: false
 
 jobs:
@@ -361,7 +365,7 @@ jobs:
           ENV_E2E_DATA_APPS_SUBDOMAIN_BASE: ${{ vars.E2E_DATA_APPS_SUBDOMAIN_BASE }}
           ENV_E2E_WEBAPP_ORIGIN: ${{ vars.E2E_WEBAPP_ORIGIN }}
           ENV_E2E_REQUIRE_SECURITY: ${{ vars.E2E_REQUIRE_SECURITY }}
-          ENV_E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
+          E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -409,7 +413,7 @@ jobs:
                         E2E_VICTIM_DATA_APP_ID E2E_DATA_APP_SLUG E2E_DATA_APP_NAMESPACE \
                         E2E_DATA_APP_VERSION E2E_SERVERLESS_APP_VERSION \
                         E2E_DATA_APPS_SUBDOMAIN_BASE E2E_WEBAPP_ORIGIN \
-                        E2E_REQUIRE_SECURITY E2E_USER_PASSWORD; do
+                        E2E_REQUIRE_SECURITY; do
             src="ENV_${envvar}"
             val="${!src:-}"
             if [[ -n "$val" ]]; then
@@ -417,6 +421,13 @@ jobs:
                 '$base + [{"name":$n,"value":$v}]')
             fi
           done
+
+          # Login password from the E2E_USER_PASSWORD secret INPUT (repo/org
+          # secret; Environment secrets do not reach a reusable workflow).
+          if [[ -n "${E2E_USER_PASSWORD:-}" ]]; then
+            ENV_VARS=$(jq -nc --arg v "$E2E_USER_PASSWORD" --argjson base "$ENV_VARS" \
+              '$base + [{"name":"E2E_USER_PASSWORD","value":$v}]')
+          fi
 
           # Caller-supplied Zephyr settings, forwarded only when set so the
           # buildspec can prefer them over its own defaults.
