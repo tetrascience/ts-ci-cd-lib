@@ -349,22 +349,11 @@ jobs:
           ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
           ZEPHYR_ACCOUNT_ID: ${{ secrets.ZEPHYR_ACCOUNT_ID }}
           PASSTHROUGH_ENV: ${{ inputs.passthrough_env }}
-          # Known e2e config sourced from the GitHub Environment (gh_environment).
-          # When the job is not in an Environment these resolve to empty and are
-          # skipped, so this is backward compatible. Read here because only a job
-          # in the Environment can see its vars/secrets, and a `uses:` caller cannot.
-          ENV_E2E_USER_EMAIL: ${{ vars.E2E_USER_EMAIL }}
-          ENV_E2E_ORG_SLUG: ${{ vars.E2E_ORG_SLUG }}
-          ENV_E2E_ORG_ID: ${{ vars.E2E_ORG_ID }}
-          ENV_E2E_VICTIM_ORG_SLUG: ${{ vars.E2E_VICTIM_ORG_SLUG }}
-          ENV_E2E_VICTIM_DATA_APP_ID: ${{ vars.E2E_VICTIM_DATA_APP_ID }}
-          ENV_E2E_DATA_APP_SLUG: ${{ vars.E2E_DATA_APP_SLUG }}
-          ENV_E2E_DATA_APP_NAMESPACE: ${{ vars.E2E_DATA_APP_NAMESPACE }}
-          ENV_E2E_DATA_APP_VERSION: ${{ vars.E2E_DATA_APP_VERSION }}
-          ENV_E2E_SERVERLESS_APP_VERSION: ${{ vars.E2E_SERVERLESS_APP_VERSION }}
-          ENV_E2E_DATA_APPS_SUBDOMAIN_BASE: ${{ vars.E2E_DATA_APPS_SUBDOMAIN_BASE }}
-          ENV_E2E_WEBAPP_ORIGIN: ${{ vars.E2E_WEBAPP_ORIGIN }}
-          ENV_E2E_REQUIRE_SECURITY: ${{ vars.E2E_REQUIRE_SECURITY }}
+          # All Environment (gh_environment) vars as JSON; the E2E_* ones are
+          # forwarded in the script below. Read in this job because only a job in
+          # the Environment sees its vars, and a `uses:` caller cannot. An empty
+          # object when the job is not in an Environment, so this is backward compatible.
+          ENV_VARS_JSON: ${{ toJSON(vars) }}
           E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
         run: |
           set -euo pipefail
@@ -393,8 +382,18 @@ jobs:
               '$base + [{"name":$n,"value":$v}]')
           done <<< "${PASSTHROUGH_ENV:-}"
 
-          # Reserved vars this workflow controls. Appended AFTER passthrough so a
-          # caller cannot accidentally shadow them.
+          # Every E2E_* var from the Environment, forwarded as-is and only when
+          # non-empty. New E2E_* vars flow through with no edit here. Appended
+          # before the reserved vars so those still win a name collision.
+          VARS_JSON="${ENV_VARS_JSON:-}"
+          [[ -z "$VARS_JSON" ]] && VARS_JSON='{}'
+          ENV_VARS=$(jq -nc --argjson base "$ENV_VARS" --argjson vars "$VARS_JSON" '
+            $base + [ $vars | to_entries[]
+              | select(.key | startswith("E2E_")) | select(.value != "")
+              | {name: .key, value: .value} ]')
+
+          # Reserved vars this workflow controls. Appended after passthrough and
+          # the Environment vars so neither can shadow them.
           ENV_VARS=$(jq -nc --argjson base "$ENV_VARS" \
             --arg env "$TARGET_ENV" --arg url "$JFROG_URL" --arg auth "$JFROG_AUTH" \
             '$base + [
@@ -402,25 +401,6 @@ jobs:
               {"name":"JFROG_ARTIFACTORY_URL","value":$url},
               {"name":"JFROG_ARTIFACTORY_AUTH","value":$auth}
             ]')
-
-          # Known e2e config from the GitHub Environment (gh_environment), forwarded
-          # only when non-empty. Each ENV_<NAME> above carries the Environment's
-          # value; strip the prefix and forward as <NAME>. E2E_USER_PASSWORD is a
-          # secret so it stays masked. Appended after the reserved vars but the
-          # final de-dupe is last-wins, so a caller must not put these in
-          # passthrough_env too (the Environment copy would not win); use one source.
-          for envvar in E2E_USER_EMAIL E2E_ORG_SLUG E2E_ORG_ID E2E_VICTIM_ORG_SLUG \
-                        E2E_VICTIM_DATA_APP_ID E2E_DATA_APP_SLUG E2E_DATA_APP_NAMESPACE \
-                        E2E_DATA_APP_VERSION E2E_SERVERLESS_APP_VERSION \
-                        E2E_DATA_APPS_SUBDOMAIN_BASE E2E_WEBAPP_ORIGIN \
-                        E2E_REQUIRE_SECURITY; do
-            src="ENV_${envvar}"
-            val="${!src:-}"
-            if [[ -n "$val" ]]; then
-              ENV_VARS=$(jq -nc --arg n "$envvar" --arg v "$val" --argjson base "$ENV_VARS" \
-                '$base + [{"name":$n,"value":$v}]')
-            fi
-          done
 
           # Login password from the E2E_USER_PASSWORD secret INPUT (repo/org
           # secret; Environment secrets do not reach a reusable workflow).
@@ -444,8 +424,8 @@ jobs:
           done
 
           # De-dupe last-wins: two entries with the same name make start-build
-          # reject the whole request. Reserved vars are appended after passthrough,
-          # so they win any collision. Order is irrelevant to CodeBuild.
+          # reject the whole request. Reserved vars are appended last, so they
+          # win any collision. Order is irrelevant to CodeBuild.
           ENV_VARS=$(jq -c 'reduce .[] as $e ({}; .[$e.name] = $e.value)
             | to_entries | map({name: .key, value: .value})' <<< "$ENV_VARS")
 

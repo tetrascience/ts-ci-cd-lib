@@ -295,6 +295,7 @@ phases:
 | `compute_type_override` | No | | Override CodeBuild compute (e.g. `BUILD_GENERAL1_MEDIUM`) |
 | `timeout_minutes` | No | `25` | Max minutes for the E2E job |
 | `passthrough_env` | No | | Extra **non-secret** env vars for the run, one `NAME=VALUE` per line. See below. |
+| `gh_environment` | No | | GitHub Environment to source per-env config from. The e2e job runs in it and forwards every `E2E_*` **variable** into the run. See below. |
 
 #### Secrets
 
@@ -317,30 +318,46 @@ plaintext CodeBuild environment override, so it appears in cleartext in the targ
 CloudTrail `StartBuild` request and on the build's environment in the CodeBuild console. Use a
 dedicated low-privilege e2e user, not a shared credential.
 
-#### Passing per-environment config (`passthrough_env`)
+#### Passing per-environment config
 
-The suite runs inside CodeBuild, so **GitHub Environment `vars` do not reach the test process
-on their own; only what this workflow forwards does. Use `passthrough_env` to inject
-non-secret, per-environment values (org slug, e2e user email, victim org, fixture overrides)
-without changing this workflow each time a suite needs a new one:
+The suite runs inside CodeBuild, so GitHub Environment values do not reach the test process on
+their own; only what this workflow forwards does. There are two ways to forward config, and they
+compose.
+
+**`gh_environment` (recommended for per-environment config).** Set it to a GitHub Environment
+name. The e2e job then runs in that Environment and forwards **every `E2E_*` variable** defined
+on it into the run, with no per-variable wiring here. Add a new `E2E_*` var to the Environment
+and it flows through automatically. A `uses:` caller cannot read Environment `vars` itself, which
+is why this reads them inside the job.
 
 ```yaml
 with:
   environment: uat
   deploy_paths: ''
   buildspec: buildspec.e2e.yml
-  passthrough_env: |
-    E2E_USER_EMAIL=${{ vars.E2E_USER_EMAIL }}
-    E2E_ORG_SLUG=${{ vars.E2E_ORG_SLUG }}
-    E2E_VICTIM_ORG_SLUG=${{ vars.E2E_VICTIM_ORG_SLUG }}
+  gh_environment: uat        # forwards every E2E_* var set on the uat Environment
 secrets:
+  # a repo or org secret; Environment secrets do not reach a reusable workflow
   E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
 ```
 
-Rules: one `NAME=VALUE` per line, blanks ignored, everything after the first `=` is the value.
-**Never put secrets here.** `with:` inputs are not masked in logs. Secrets go through declared
-`secrets:` inputs (that is why the password is separate). Unset caller `vars` interpolate to an
-empty value; have the suite treat blank as unset.
+**`passthrough_env` (for literal or repo-level values).** One `NAME=VALUE` per line, blanks
+ignored, everything after the first `=` is the value. Use it for values the caller holds directly
+(literals or repo-level `vars`), not Environment vars:
+
+```yaml
+with:
+  passthrough_env: |
+    E2E_WEBAPP_ORIGIN=https://example.test
+    E2E_ORG_SLUG=${{ vars.E2E_ORG_SLUG }}   # a repo-level var, not an Environment var
+```
+
+Precedence when a name comes from more than one source (last wins): `passthrough_env`, then
+Environment `E2E_*` vars, then the reserved vars this workflow controls (`E2E_ENVIRONMENT`,
+`JFROG_ARTIFACTORY_*`). So the Environment overrides passthrough, and the reserved vars override
+both. **Never put secrets in `passthrough_env`**: `with:` inputs are not masked in logs. Secrets
+go through declared `secrets:` inputs, which is why the password is separate. Unset values
+interpolate to empty and are dropped; have the suite treat blank as unset.
 
 > **Buildspec authors:** a buildspec that assigns these unconditionally will clobber
 > what the workflow passes. Prefer the inbound value:
