@@ -40,9 +40,20 @@ on:
       passthrough_env:
         description: |
           Non-secret env vars for the CodeBuild run, one NAME=VALUE per line.
-          Lets a caller forward GitHub Environment vars without changing this
-          workflow. Not for secrets: `with:` inputs are unmasked. Use secrets
-          inputs for those (see E2E_USER_PASSWORD).
+          Literal or repo-level values only; a `uses:` caller cannot read GitHub
+          Environment values, so for those use gh_environment below instead.
+        type: string
+        default: ""
+        required: false
+      gh_environment:
+        description: |
+          GitHub Environment whose vars/secrets to source e2e config from. When
+          set, the e2e job runs in this Environment and reads a known set of E2E_*
+          vars (E2E_USER_EMAIL, E2E_ORG_SLUG, E2E_VICTIM_ORG_SLUG,
+          E2E_VICTIM_DATA_APP_ID, fixture overrides, E2E_REQUIRE_SECURITY) plus the
+          E2E_USER_PASSWORD secret, forwarding the non-empty ones into the run.
+          This is how per-environment credentials reach CodeBuild, since a `uses:`
+          caller cannot attach to an Environment itself.
         type: string
         default: ""
         required: false
@@ -62,9 +73,6 @@ on:
         required: false
       ZEPHYR_ACCOUNT_ID:
         description: "Optional Jira account id used for Zephyr executedById. Same precedence as ZEPHYR_CYCLE_KEY."
-        required: false
-      E2E_USER_PASSWORD:
-        description: "Optional password for a dedicated e2e login user, masked and forwarded into the run. Lets security suites log in as a real single-org user instead of minting. The email is non-secret and rides passthrough_env."
         required: false
 
 jobs:
@@ -235,6 +243,9 @@ jobs:
       (needs.check-changes.result == 'success' || needs.check-changes.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
+    # Empty gh_environment means no Environment (backward compatible). When set,
+    # the job runs in that caller-repo Environment so it can read its vars/secrets.
+    environment: ${{ inputs.gh_environment }}
     permissions:
       id-token: write
       contents: read
@@ -334,7 +345,23 @@ jobs:
           ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
           ZEPHYR_ACCOUNT_ID: ${{ secrets.ZEPHYR_ACCOUNT_ID }}
           PASSTHROUGH_ENV: ${{ inputs.passthrough_env }}
-          E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
+          # Known e2e config sourced from the GitHub Environment (gh_environment).
+          # When the job is not in an Environment these resolve to empty and are
+          # skipped, so this is backward compatible. Read here because only a job
+          # in the Environment can see its vars/secrets, and a `uses:` caller cannot.
+          ENV_E2E_USER_EMAIL: ${{ vars.E2E_USER_EMAIL }}
+          ENV_E2E_ORG_SLUG: ${{ vars.E2E_ORG_SLUG }}
+          ENV_E2E_ORG_ID: ${{ vars.E2E_ORG_ID }}
+          ENV_E2E_VICTIM_ORG_SLUG: ${{ vars.E2E_VICTIM_ORG_SLUG }}
+          ENV_E2E_VICTIM_DATA_APP_ID: ${{ vars.E2E_VICTIM_DATA_APP_ID }}
+          ENV_E2E_DATA_APP_SLUG: ${{ vars.E2E_DATA_APP_SLUG }}
+          ENV_E2E_DATA_APP_NAMESPACE: ${{ vars.E2E_DATA_APP_NAMESPACE }}
+          ENV_E2E_DATA_APP_VERSION: ${{ vars.E2E_DATA_APP_VERSION }}
+          ENV_E2E_SERVERLESS_APP_VERSION: ${{ vars.E2E_SERVERLESS_APP_VERSION }}
+          ENV_E2E_DATA_APPS_SUBDOMAIN_BASE: ${{ vars.E2E_DATA_APPS_SUBDOMAIN_BASE }}
+          ENV_E2E_WEBAPP_ORIGIN: ${{ vars.E2E_WEBAPP_ORIGIN }}
+          ENV_E2E_REQUIRE_SECURITY: ${{ vars.E2E_REQUIRE_SECURITY }}
+          ENV_E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
         run: |
           set -euo pipefail
 
@@ -372,11 +399,24 @@ jobs:
               {"name":"JFROG_ARTIFACTORY_AUTH","value":$auth}
             ]')
 
-          # Login password, forwarded only when set. Masked (arrives as a secret).
-          if [[ -n "${E2E_USER_PASSWORD:-}" ]]; then
-            ENV_VARS=$(jq -nc --arg v "$E2E_USER_PASSWORD" --argjson base "$ENV_VARS" \
-              '$base + [{"name":"E2E_USER_PASSWORD","value":$v}]')
-          fi
+          # Known e2e config from the GitHub Environment (gh_environment), forwarded
+          # only when non-empty. Each ENV_<NAME> above carries the Environment's
+          # value; strip the prefix and forward as <NAME>. E2E_USER_PASSWORD is a
+          # secret so it stays masked. Appended after the reserved vars but the
+          # final de-dupe is last-wins, so a caller must not put these in
+          # passthrough_env too (the Environment copy would not win); use one source.
+          for envvar in E2E_USER_EMAIL E2E_ORG_SLUG E2E_ORG_ID E2E_VICTIM_ORG_SLUG \
+                        E2E_VICTIM_DATA_APP_ID E2E_DATA_APP_SLUG E2E_DATA_APP_NAMESPACE \
+                        E2E_DATA_APP_VERSION E2E_SERVERLESS_APP_VERSION \
+                        E2E_DATA_APPS_SUBDOMAIN_BASE E2E_WEBAPP_ORIGIN \
+                        E2E_REQUIRE_SECURITY E2E_USER_PASSWORD; do
+            src="ENV_${envvar}"
+            val="${!src:-}"
+            if [[ -n "$val" ]]; then
+              ENV_VARS=$(jq -nc --arg n "$envvar" --arg v "$val" --argjson base "$ENV_VARS" \
+                '$base + [{"name":$n,"value":$v}]')
+            fi
+          done
 
           # Caller-supplied Zephyr settings, forwarded only when set so the
           # buildspec can prefer them over its own defaults.
