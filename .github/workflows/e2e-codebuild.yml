@@ -37,6 +37,27 @@ on:
         type: number
         default: 25
         required: false
+      passthrough_env:
+        description: |
+          Non-secret env vars for the CodeBuild run, one NAME=VALUE per line.
+          Literal or repo-level values only; a `uses:` caller cannot read GitHub
+          Environment values, so for those use gh_environment below instead.
+        type: string
+        default: ""
+        required: false
+      gh_environment:
+        description: |
+          GitHub Environment to source non-secret e2e config from. When set, the
+          e2e job runs in this Environment and forwards every non-empty E2E_* var
+          visible to the job (org, repo, and this Environment, with the Environment
+          winning) into the run. When unset nothing is forwarded, so callers that
+          do not opt in are unchanged. This is how per-environment non-secret config
+          reaches CodeBuild, since a `uses:` caller cannot attach to an Environment.
+          Environment SECRETS do not reach a reusable workflow, so the password
+          comes from the E2E_USER_PASSWORD secret input (a repo or org secret).
+        type: string
+        default: ""
+        required: false
     secrets:
       JFROG_ARTIFACTORY_NPM_VIRTUAL_URL:
         required: true
@@ -53,6 +74,9 @@ on:
         required: false
       ZEPHYR_ACCOUNT_ID:
         description: "Optional Jira account id used for Zephyr executedById. Same precedence as ZEPHYR_CYCLE_KEY."
+        required: false
+      E2E_USER_PASSWORD:
+        description: "Optional password for a dedicated e2e login user. Masked in the Actions log only; it reaches CodeBuild as a plaintext env override (see the README note), so use a dedicated low-privilege user. Must be a repo or org secret: Environment secrets do not reach a reusable workflow (only its vars do, via gh_environment)."
         required: false
 
 jobs:
@@ -223,6 +247,9 @@ jobs:
       (needs.check-changes.result == 'success' || needs.check-changes.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
+    # Empty gh_environment means no Environment (backward compatible). When set,
+    # the job runs in that caller-repo Environment so it can read its vars/secrets.
+    environment: ${{ inputs.gh_environment }}
     permissions:
       id-token: write
       contents: read
@@ -321,20 +348,74 @@ jobs:
           ZEPHYR_CYCLE_KEY: ${{ secrets.ZEPHYR_CYCLE_KEY }}
           ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
           ZEPHYR_ACCOUNT_ID: ${{ secrets.ZEPHYR_ACCOUNT_ID }}
+          PASSTHROUGH_ENV: ${{ inputs.passthrough_env }}
+          # E2E_* config visible to the job (org, repo, and the selected
+          # Environment, the Environment winning) as JSON; the script forwards it
+          # below. Only populated when gh_environment is set, so callers that do
+          # not opt into an Environment forward nothing, as before. Read in this
+          # job because a `uses:` caller cannot see Environment vars.
+          ENV_VARS_JSON: ${{ inputs.gh_environment != '' && toJSON(vars) || '{}' }}
+          E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
         run: |
           set -euo pipefail
 
-          ENV_VARS=$(jq -nc '[
-            {"name":"E2E_ENVIRONMENT","value":env.TARGET_ENV},
-            {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
-            {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
-          ]')
+          ENV_VARS='[]'
 
-          # Forward caller-supplied Zephyr settings only when set, so the buildspec
-          # can prefer them over its own defaults. Appended conditionally so
-          # callers that omit them are unaffected (no empty override that would
-          # otherwise suppress the buildspec's fallback). Useful where a caller
-          # holds these values as GitHub secrets already.
+          # Non-secret vars from passthrough_env, one NAME=VALUE per line. Blank
+          # lines are ignored; everything after the first "=" is the value, and
+          # surrounding whitespace on name and value is trimmed. Appended FIRST so
+          # the reserved vars below always win on a name collision (see the dedupe
+          # at the end). An invalid name fails fast with a clear message.
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            [[ -z "$line" || "$line" != *"="* ]] && continue
+            name="${line%%=*}"
+            value="${line#*=}"
+            name="${name#"${name%%[![:space:]]*}"}"          # ltrim name
+            name="${name%"${name##*[![:space:]]}"}"          # rtrim name
+            value="${value#"${value%%[![:space:]]*}"}"        # ltrim value
+            value="${value%"${value##*[![:space:]]}"}"        # rtrim value
+            [[ -z "$name" ]] && continue
+            if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo "::error::passthrough_env has an invalid variable name: '$name'"
+              exit 1
+            fi
+            ENV_VARS=$(jq -nc --arg n "$name" --arg v "$value" --argjson base "$ENV_VARS" \
+              '$base + [{"name":$n,"value":$v}]')
+          done <<< "${PASSTHROUGH_ENV:-}"
+
+          # Every non-empty E2E_* var visible to the job, forwarded as-is; new
+          # E2E_* vars flow through with no edit here. Excludes E2E_USER_PASSWORD
+          # so the password only ever travels the masked secret path below, never
+          # as an unmasked variable. Appended before the reserved vars so those
+          # still win a name collision.
+          VARS_JSON="${ENV_VARS_JSON:-}"
+          [[ -z "$VARS_JSON" ]] && VARS_JSON='{}'
+          ENV_VARS=$(jq -nc --argjson base "$ENV_VARS" --argjson vars "$VARS_JSON" '
+            $base + [ $vars | to_entries[]
+              | select(.key | startswith("E2E_")) | select(.key != "E2E_USER_PASSWORD")
+              | select(.value != "")
+              | {name: .key, value: .value} ]')
+
+          # Reserved vars this workflow controls. Appended after passthrough and
+          # the Environment vars so neither can shadow them.
+          ENV_VARS=$(jq -nc --argjson base "$ENV_VARS" \
+            --arg env "$TARGET_ENV" --arg url "$JFROG_URL" --arg auth "$JFROG_AUTH" \
+            '$base + [
+              {"name":"E2E_ENVIRONMENT","value":$env},
+              {"name":"JFROG_ARTIFACTORY_URL","value":$url},
+              {"name":"JFROG_ARTIFACTORY_AUTH","value":$auth}
+            ]')
+
+          # Login password from the E2E_USER_PASSWORD secret INPUT (repo/org
+          # secret; Environment secrets do not reach a reusable workflow).
+          if [[ -n "${E2E_USER_PASSWORD:-}" ]]; then
+            ENV_VARS=$(jq -nc --arg v "$E2E_USER_PASSWORD" --argjson base "$ENV_VARS" \
+              '$base + [{"name":"E2E_USER_PASSWORD","value":$v}]')
+          fi
+
+          # Caller-supplied Zephyr settings, forwarded only when set so the
+          # buildspec can prefer them over its own defaults.
           #
           # NOTE for buildspec authors: assigning these unconditionally clobbers
           # what is passed here. Prefer the inbound value:
@@ -346,6 +427,12 @@ jobs:
                 '$base + [{"name":$n,"value":$v}]')
             fi
           done
+
+          # De-dupe last-wins: two entries with the same name make start-build
+          # reject the whole request. Reserved vars are appended last, so they
+          # win any collision. Order is irrelevant to CodeBuild.
+          ENV_VARS=$(jq -c 'reduce .[] as $e ({}; .[$e.name] = $e.value)
+            | to_entries | map({name: .key, value: .value})' <<< "$ENV_VARS")
 
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
