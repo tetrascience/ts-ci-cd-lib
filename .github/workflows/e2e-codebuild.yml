@@ -606,6 +606,12 @@ jobs:
           WORKFLOW: ${{ github.workflow }}
           REPO: ${{ github.repository }}
           REF: ${{ github.ref_name }}
+          # On a pull_request run, github.ref_name is the merge ref ("36/merge"),
+          # not a branch, so it would render as a branch name that does not exist.
+          # head_ref is the actual source branch and is set only for
+          # pull_request/pull_request_target, which is exactly the case guarded by
+          # PR_URL being non-empty below.
+          HEAD_REF: ${{ github.head_ref }}
           SHA: ${{ github.sha }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -640,7 +646,8 @@ jobs:
           # Prefer the PR link when the run came from a pull_request; otherwise the
           # branch is the useful pointer.
           if [[ -n "$PR_URL" ]]; then
-            WHERE="<${PR_URL}|PR> on branch \`${REF}\` @ \`${SHA:0:7}\`"
+            # Fall back to REF only if head_ref is somehow empty while PR_URL is set.
+            WHERE="<${PR_URL}|PR> on branch \`${HEAD_REF:-$REF}\` @ \`${SHA:0:7}\`"
           else
             WHERE="branch \`${REF}\` @ \`${SHA:0:7}\`"
           fi
@@ -656,9 +663,9 @@ jobs:
           fi
 
           # jq builds the payload because every interpolated value here (branch
-          # name, workflow name) is attacker-influencable text, and hand-quoting
+          # name, workflow name) is attacker-influenced text, and hand-quoting
           # JSON around it produces both broken payloads and injection.
-          jq -nc \
+          PAYLOAD=$(jq -nc \
             --arg mention "${MENTION:+$MENTION }" \
             --arg headline "$HEADLINE" \
             --arg repo "$REPO" \
@@ -680,5 +687,21 @@ jobs:
                           + $cause + "\n" + $build + "\n" + $links)
                  }
                }]
-             }' \
-            | curl -sS --fail-with-body -X POST -H 'Content-type: application/json' --data @- "$SLACK_WEBHOOK_URL"
+             }')
+
+          # Posting is best effort and must never be the reason a run looks broken.
+          # Bounded time so a hanging Slack cannot sit on a runner, a couple of
+          # retries for a transient blip, and a warning rather than a failure if it
+          # still does not go through: the real e2e failure is already reported by
+          # the e2e job, and a red notify job on top of it only obscures that.
+          RC=0
+          printf '%s' "$PAYLOAD" \
+            | curl -sS --fail-with-body \
+                --max-time 15 --retry 2 --retry-delay 2 --retry-connrefused \
+                -X POST -H 'Content-type: application/json' --data @- "$SLACK_WEBHOOK_URL" || RC=$?
+
+          if [[ "$RC" -eq 0 ]]; then
+            echo "Posted the failure to Slack."
+          else
+            echo "::warning::Could not post to Slack (curl exit $RC). The e2e failure itself is reported by the e2e job."
+          fi
