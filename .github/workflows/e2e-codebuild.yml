@@ -58,6 +58,15 @@ on:
         type: string
         default: ""
         required: false
+      slack_mention:
+        description: |
+          Optional Slack mention prepended to a failure message, e.g. "<!channel>",
+          "<!here>", or "<!subteam^S0123ABC>". Left empty the message posts without
+          pinging anyone, so how loud the alert is stays each caller's decision
+          rather than something this shared workflow imposes on every repo.
+        type: string
+        default: ""
+        required: false
     secrets:
       JFROG_ARTIFACTORY_NPM_VIRTUAL_URL:
         required: true
@@ -77,6 +86,9 @@ on:
         required: false
       E2E_USER_PASSWORD:
         description: "Optional password for a dedicated e2e login user. Masked in the Actions log only; it reaches CodeBuild as a plaintext env override (see the README note), so use a dedicated low-privilege user. Must be a repo or org secret: Environment secrets do not reach a reusable workflow (only its vars do, via gh_environment)."
+        required: false
+      SLACK_WEBHOOK_URL:
+        description: "Optional Slack incoming webhook. When set, a failing run posts one message to that webhook's channel; when unset the notify job no-ops, so an unconfigured caller is unaffected and Slack can never turn a run red. Because the webhook is channel-locked, passing it conditionally is also how a caller scopes WHICH runs alert: pass it only when the resolved environment is one you want notified."
         required: false
 
 jobs:
@@ -247,6 +259,14 @@ jobs:
       (needs.check-changes.result == 'success' || needs.check-changes.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
+    # Surfaced for the notify job below. These are evaluated at the end of the
+    # job, so they are still populated when the job FAILS, which is the only case
+    # that reads them. They stay job outputs rather than workflow_call outputs
+    # because nothing outside this file needs them.
+    outputs:
+      build_id: ${{ steps.codebuild.outputs.build_id }}
+      build_status: ${{ steps.wait.outputs.build_status }}
+      log_link: ${{ steps.wait.outputs.log_link }}
     # Empty gh_environment means no Environment (backward compatible). When set,
     # the job runs in that caller-repo Environment so it can read its vars/secrets.
     environment: ${{ inputs.gh_environment }}
@@ -550,3 +570,115 @@ jobs:
             echo "::error::CloudWatch logs: $LOG_LINK"
             exit 1
           fi
+
+  # Post one message to Slack when a run fails.
+  #
+  # This lives here rather than in each caller for two reasons. It is written once
+  # for every consuming repo instead of copied per repo, and the CodeBuild build id
+  # and CloudWatch deep link only exist inside this workflow: it declares no
+  # workflow_call outputs, so a caller-side job can observe nothing but the called
+  # job's pass/fail and could never name the build that failed.
+  #
+  # A separate job rather than a step in e2e, so a failed DEPLOY is covered too:
+  # when deploy fails the e2e job is skipped entirely and any step inside it would
+  # never run.
+  notify:
+    needs: [check-changes, deploy, e2e]
+    # Deliberately keyed off job results, not a test step, so every failing path
+    # alerts: a failed deploy, CodeBuild FAILED/TIMED_OUT/FAULT/STOPPED, and an
+    # infrastructure error in the e2e job (assume-role, source upload) that never
+    # reaches CodeBuild at all. check-changes is in needs only to complete the
+    # dependency chain; its own failure surfaces as e2e being skipped, not failed,
+    # and a skipped e2e is not a test failure worth paging a channel over.
+    if: always() && (needs.deploy.result == 'failure' || needs.e2e.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post failure to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          MENTION: ${{ inputs.slack_mention }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          # Empty when the deploy failed, since the e2e job never started.
+          BUILD_ID: ${{ needs.e2e.outputs.build_id }}
+          BUILD_STATUS: ${{ needs.e2e.outputs.build_status }}
+          LOG_LINK: ${{ needs.e2e.outputs.log_link }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          WORKFLOW: ${{ github.workflow }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # A caller that passes no webhook gets no alert, and never a red run
+          # because of Slack. This is also the scoping mechanism: callers pass the
+          # secret only for the environments they want notified.
+          if [[ -z "$SLACK_WEBHOOK_URL" ]]; then
+            echo "No SLACK_WEBHOOK_URL supplied; skipping the Slack alert."
+            exit 0
+          fi
+
+          # Distinguish the two failure shapes. A deploy failure has no build to
+          # point at, so claiming a CodeBuild status would be a lie.
+          if [[ "$DEPLOY_RESULT" == "failure" ]]; then
+            HEADLINE="e2e DEPLOY FAILED"
+            CAUSE="The deploy never completed, so the suite did not run."
+            # Documented defect in this workflow, called out so a re-run's
+            # inevitable failure is not read as a product regression: "Push to
+            # environment branch" is a no-op when the env branch already points at
+            # this SHA, so no deploy event fires, no run matches the headSha, and
+            # "Wait for deploy" times out. Re-running a green commit always fails
+            # here.
+            CAUSE="$CAUSE If this was a re-run of an already-deployed commit, this workflow cannot be re-run and this failure is expected rather than a real break."
+          else
+            HEADLINE="e2e FAILED"
+            CAUSE="CodeBuild status: ${BUILD_STATUS:-unknown (the run failed before the build reported)}"
+          fi
+
+          # Prefer the PR link when the run came from a pull_request; otherwise the
+          # branch is the useful pointer.
+          if [[ -n "$PR_URL" ]]; then
+            WHERE="<${PR_URL}|PR> on branch \`${REF}\` @ \`${SHA:0:7}\`"
+          else
+            WHERE="branch \`${REF}\` @ \`${SHA:0:7}\`"
+          fi
+
+          LINKS="<${RUN_URL}|GitHub run>"
+          if [[ -n "$LOG_LINK" && "$LOG_LINK" != "null" ]]; then
+            LINKS="${LINKS} · <${LOG_LINK}|CloudWatch logs>"
+          fi
+          if [[ -n "$BUILD_ID" ]]; then
+            BUILD_LINE="Build \`${BUILD_ID}\`"
+          else
+            BUILD_LINE="No CodeBuild build was started."
+          fi
+
+          # jq builds the payload because every interpolated value here (branch
+          # name, workflow name) is attacker-influencable text, and hand-quoting
+          # JSON around it produces both broken payloads and injection.
+          jq -nc \
+            --arg mention "${MENTION:+$MENTION }" \
+            --arg headline "$HEADLINE" \
+            --arg repo "$REPO" \
+            --arg wf "$WORKFLOW" \
+            --arg env "$ENVIRONMENT" \
+            --arg cause "$CAUSE" \
+            --arg where "$WHERE" \
+            --arg build "$BUILD_LINE" \
+            --arg links "$LINKS" \
+            '{
+               text: ($mention + ":rotating_light: " + $headline + " — " + $repo + " @ " + $env),
+               blocks: [{
+                 type: "section",
+                 text: {
+                   type: "mrkdwn",
+                   text: ($mention + ":rotating_light: *" + $headline + "* — `" + $repo
+                          + "` @ *" + $env + "*\n"
+                          + $wf + " · " + $where + "\n"
+                          + $cause + "\n" + $build + "\n" + $links)
+                 }
+               }]
+             }' \
+            | curl -sS --fail-with-body -X POST -H 'Content-type: application/json' --data @- "$SLACK_WEBHOOK_URL"
