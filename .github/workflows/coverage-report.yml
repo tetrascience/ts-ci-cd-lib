@@ -37,6 +37,16 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  # Needed by the base-coverage download, which lists workflow runs on main to
+  # find the artifact. Without it that step 403s with "Resource not accessible
+  # by integration", is swallowed by continue-on-error, and every run reports
+  # "No base coverage found — skipping regression check" — so the no-regression
+  # half of this action silently never runs.
+  #
+  # A called workflow cannot grant itself more than the caller allows, so this
+  # declaration only takes effect once the CALLER also grants `actions: read`.
+  # Callers that do not are no worse off than before.
+  actions: read
 
 jobs:
   coverage:
