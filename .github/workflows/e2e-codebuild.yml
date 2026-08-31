@@ -473,6 +473,21 @@ jobs:
           ENV_VARS=$(jq -c 'reduce .[] as $e ({}; .[$e.name] = $e.value)
             | to_entries | map({name: .key, value: .value})' <<< "$ENV_VARS")
 
+          # Integers first, before ANY arithmetic. `[[ -gt ]]` and (( )) abort
+          # the step with a raw bash error on an empty or fractional value —
+          # precisely the unhelpful failure the rest of this block exists to
+          # prevent. Both are reachable: workflow_call `type: number` accepts
+          # floats, and an expression that evaluates to nothing arrives here as
+          # an empty string.
+          if [[ ! "$JOB_TIMEOUT_MINUTES" =~ ^[0-9]+$ ]]; then
+            echo "::error::timeout_minutes must be a whole number of minutes (got '$JOB_TIMEOUT_MINUTES')"
+            exit 1
+          fi
+          if [[ ! "$BUILD_TIMEOUT_MINUTES" =~ ^[0-9]+$ ]]; then
+            echo "::error::build_timeout_minutes must be a whole number of minutes, or 0 to inherit the tdp-e2e project timeout (got '$BUILD_TIMEOUT_MINUTES')"
+            exit 1
+          fi
+
           # Fail fast and locally on a misconfigured budget: CodeBuild would
           # reject an out-of-range value with a generic API error, and a build
           # cap at or above the GitHub-side wait means the runner is killed
