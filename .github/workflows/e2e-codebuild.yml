@@ -33,9 +33,26 @@ on:
         type: string
         required: false
       timeout_minutes:
-        description: "Max minutes for the E2E job — includes buffer for setup steps"
+        description: >-
+          Max minutes for the GitHub-side E2E job: the runner's own
+          timeout-minutes and the "Wait for CodeBuild" poll budget. This does
+          NOT cap the CodeBuild build itself — use build_timeout_minutes for
+          that. Keep it comfortably ABOVE build_timeout_minutes so the runner
+          outlives the build and can report a real TIMED_OUT status instead of
+          being killed first.
         type: number
         default: 25
+        required: false
+      build_timeout_minutes:
+        description: >-
+          Max minutes for the CodeBuild build itself, passed as
+          --timeout-in-minutes-override. Leave at 0 to inherit the tdp-e2e
+          project's own timeout (15 minutes). Set this when a suite legitimately
+          runs longer: without it the build is killed at the project default and
+          the log stream simply stops mid-run with no summary, which reads like
+          a hung test rather than a timeout. CodeBuild accepts 5-480.
+        type: number
+        default: 0
         required: false
       passthrough_env:
         description: |
@@ -365,6 +382,8 @@ jobs:
           BUILDSPEC_PATH: ${{ inputs.buildspec }}
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
           COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
+          BUILD_TIMEOUT_MINUTES: ${{ inputs.build_timeout_minutes }}
+          JOB_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
           ZEPHYR_CYCLE_KEY: ${{ secrets.ZEPHYR_CYCLE_KEY }}
           ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
           ZEPHYR_ACCOUNT_ID: ${{ secrets.ZEPHYR_ACCOUNT_ID }}
@@ -454,6 +473,36 @@ jobs:
           ENV_VARS=$(jq -c 'reduce .[] as $e ({}; .[$e.name] = $e.value)
             | to_entries | map({name: .key, value: .value})' <<< "$ENV_VARS")
 
+          # Integers first, before ANY arithmetic. `[[ -gt ]]` and (( )) abort
+          # the step with a raw bash error on an empty or fractional value —
+          # precisely the unhelpful failure the rest of this block exists to
+          # prevent. Both are reachable: workflow_call `type: number` accepts
+          # floats, and an expression that evaluates to nothing arrives here as
+          # an empty string.
+          if [[ ! "$JOB_TIMEOUT_MINUTES" =~ ^[0-9]+$ ]]; then
+            echo "::error::timeout_minutes must be a whole number of minutes (got '$JOB_TIMEOUT_MINUTES')"
+            exit 1
+          fi
+          if [[ ! "$BUILD_TIMEOUT_MINUTES" =~ ^[0-9]+$ ]]; then
+            echo "::error::build_timeout_minutes must be a whole number of minutes, or 0 to inherit the tdp-e2e project timeout (got '$BUILD_TIMEOUT_MINUTES')"
+            exit 1
+          fi
+
+          # Fail fast and locally on a misconfigured budget: CodeBuild would
+          # reject an out-of-range value with a generic API error, and a build
+          # cap at or above the GitHub-side wait means the runner is killed
+          # first — losing the TIMED_OUT status that explains the failure.
+          if [[ "$BUILD_TIMEOUT_MINUTES" -gt 0 ]]; then
+            if (( BUILD_TIMEOUT_MINUTES < 5 || BUILD_TIMEOUT_MINUTES > 480 )); then
+              echo "::error::build_timeout_minutes must be between 5 and 480 (got $BUILD_TIMEOUT_MINUTES)"
+              exit 1
+            fi
+            if (( BUILD_TIMEOUT_MINUTES >= JOB_TIMEOUT_MINUTES )); then
+              echo "::error::build_timeout_minutes ($BUILD_TIMEOUT_MINUTES) must be LESS than timeout_minutes ($JOB_TIMEOUT_MINUTES), or the runner is killed before the build can report TIMED_OUT"
+              exit 1
+            fi
+          fi
+
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
             --source-type-override S3
@@ -466,6 +515,10 @@ jobs:
           fi
           if [[ -n "$COMPUTE_TYPE_OVERRIDE" ]]; then
             CMD+=(--compute-type-override "$COMPUTE_TYPE_OVERRIDE")
+          fi
+          # 0 = inherit the project's own timeout. Anything else caps THIS build.
+          if [[ "$BUILD_TIMEOUT_MINUTES" -gt 0 ]]; then
+            CMD+=(--timeout-in-minutes-override "$BUILD_TIMEOUT_MINUTES")
           fi
 
           startBuild=$("${CMD[@]}")
