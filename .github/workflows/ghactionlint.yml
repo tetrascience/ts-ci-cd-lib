@@ -51,9 +51,13 @@ jobs:
         env:
           VERSION: ${{ inputs.actionlint_version }}
           EXPECTED_SHA256: ${{ inputs.actionlint_sha256 }}
+        # Downloads the release tarball and verifies it by SHA-256, rather than
+        # piping a fetched script into bash. --retry covers the 429 that
+        # raw.githubusercontent returns under load; the checksum is what makes
+        # a wrong body fatal instead of executable.
         run: |
           set -euo pipefail
-          curl -fsSL -o actionlint.tgz \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 -o actionlint.tgz \
             "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz"
           echo "${EXPECTED_SHA256}  actionlint.tgz" | sha256sum -c -
           tar -xzf actionlint.tgz actionlint

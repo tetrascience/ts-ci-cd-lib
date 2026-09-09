@@ -36,14 +36,23 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
+  # Needed by the base-coverage download, which lists workflow runs on main to
+  # find the artifact. Without it that step 403s with "Resource not accessible
+  # by integration", is swallowed by continue-on-error, and every run reports
+  # "No base coverage found — skipping regression check" — so the no-regression
+  # half of this action silently never runs.
+  #
+  # A called workflow cannot grant itself more than the caller allows, so this
+  # declaration only takes effect once the CALLER also grants `actions: read`.
+  # Callers that do not are no worse off than before.
+  actions: read
 
 jobs:
   coverage:
     name: Coverage report
     runs-on: ubuntu-latest
     permissions:
-      # Required to download the main-branch baseline coverage artifact.
-      actions: read
       contents: read
       # Required to create/update the PR coverage comment.
       pull-requests: write
@@ -208,26 +217,50 @@ jobs:
 
             # A failure here must never look like "no files changed": zero files
             # reaching the loop below makes the threshold check pass silently.
-            # Empty is the dangerous body, not a JSON error object — `jq -r`
-            # exits 0 on empty input and prints nothing, whereas an error object
-            # or an HTML page makes it exit non-zero and `set -e` aborts. So
-            # both the transfer and the shape are checked explicitly.
+            #
+            # This mirrors coverage-check/action.yml (#33) deliberately — the
+            # inlined path needs its own guard because this workflow no longer
+            # calls that action, so the two are parallel implementations of one
+            # rule, not a duplicate to delete. Kept byte-comparable so they can
+            # be diffed.
+            #
+            # Status is checked explicitly rather than inferred from the body:
+            # an empty body (network failure) makes `jq -r` exit 0 printing
+            # nothing, which is the silent-pass case; an error object or HTML
+            # page makes it exit non-zero, which merely aborts loudly.
             CHANGED_FILES=""
             URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100"
+            HEADERS=$(mktemp)
+            BODY=$(mktemp)
             while [ -n "$URL" ]; do
-              if ! RESP=$(curl --fail --silent --show-error -D /tmp/coverage-headers \
-                    -H "Authorization: token ${GH_TOKEN}" "$URL"); then
-                echo "::error::Could not list the PR's changed files (${URL}). Refusing to report new-code coverage against an unknown file list."
+              STATUS=$(curl -sS -o "$BODY" -D "$HEADERS" -w '%{http_code}' \
+                -H "Authorization: token ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "$URL" || echo "000")
+
+              if [ "$STATUS" != "200" ]; then
+                echo "::error::Could not list changed files for PR #${PR_NUMBER} (HTTP ${STATUS}). Refusing to report a pass from an incomplete file list."
+                rm -f "$HEADERS" "$BODY"
                 exit 1
               fi
-              if ! jq -e 'type == "array"' <<<"$RESP" >/dev/null 2>&1; then
-                echo "::error::Expected a JSON array of changed files from ${URL}, got: $(head -c 200 <<<"$RESP")"
-                exit 1
+
+              if ! PAGE=$(jq -er '.[] | select(.status != "removed") | .filename' "$BODY" 2>/dev/null); then
+                # `-e` also makes an empty array non-zero; that is a legitimate
+                # empty page, not an error, so only a malformed body is fatal.
+                if ! jq -e 'type == "array"' "$BODY" > /dev/null 2>&1; then
+                  echo "::error::Unexpected response listing changed files for PR #${PR_NUMBER}."
+                  rm -f "$HEADERS" "$BODY"
+                  exit 1
+                fi
+                PAGE=""
               fi
-              CHANGED_FILES+=$(jq -r '.[] | select(.status != "removed") | .filename' <<<"$RESP")$'\n'
-              URL=$(sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' /tmp/coverage-headers)
+
+              if [ -n "$PAGE" ]; then
+                CHANGED_FILES+="$PAGE"$'\n'
+              fi
+              URL=$(sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' "$HEADERS")
             done
-            rm -f /tmp/coverage-headers
+            rm -f "$HEADERS" "$BODY"
 
             # An empty exclude pattern must exclude NOTHING. `grep -vE ""`
             # matches every line, so passing source_file_exclude: '' — the
