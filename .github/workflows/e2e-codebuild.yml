@@ -43,6 +43,11 @@ on:
         type: number
         default: 25
         required: false
+      stream_codebuild_logs:
+        description: "Stream raw CodeBuild logs into the GitHub Actions log"
+        type: boolean
+        default: false
+        required: false
       build_timeout_minutes:
         description: >-
           Max minutes for the CodeBuild build itself, passed as
@@ -108,8 +113,37 @@ on:
         description: "Optional Slack incoming webhook. When set, a failing run posts one message to that webhook's channel; when unset the notify job no-ops, so an unconfigured caller is unaffected and Slack can never turn a run red. Because the webhook is channel-locked, passing it conditionally is also how a caller scopes WHICH runs alert: pass it only when the resolved environment is one you want notified."
         required: false
 
+permissions:
+  contents: read
+
+# Environment → AWS account. THE single source of truth for which environments
+# this workflow accepts: both the pre-flight validation and the resolve step
+# read it, so an env can never pass one and fail the other. That drift had a
+# bad direction — an env in the resolve map but not the pre-flight list was
+# rejected before it could resolve, and one in the list but not the map got its
+# branch force-pushed first and failed afterwards.
+#
+# The E2E infra (CodeBuild, OIDC role, S3 bucket) comes from
+# infrastructure/tdp-e2e.yaml, deployed either as a substack of the TDP service
+# stack via EnableE2E=true or as a standalone stack. Account IDs are stable
+# infrastructure facts.
+env:
+  E2E_ACCOUNTS: |
+    predev=611255221147
+    predev2=383434869204
+    predev3=866984931759
+    predev4=456932089055
+    predev5=734018046548
+    predev6=326392129485
+    predev7=901926888715
+    predev8=581141123528
+    dev=706717599419
+    preuat=555180171822
+    uat=753968983172
+
 jobs:
   check-changes:
+    name: Check deploy changes
     if: ${{ inputs.deploy_paths != '' }}
     runs-on: ubuntu-latest
     permissions:
@@ -147,7 +181,7 @@ jobs:
 
           echo "$TARGET_ENV is a pipeline-deployed environment; continuing."
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -195,6 +229,7 @@ jobs:
           echo "should_deploy=false" >> "$GITHUB_OUTPUT"
 
   deploy:
+    name: Deploy to environment branch
     needs: check-changes
     if: ${{ needs.check-changes.outputs.should_deploy == 'true' }}
     runs-on: ubuntu-latest
@@ -212,6 +247,20 @@ jobs:
       # since a reusable workflow's token is capped by the caller's permissions.
       actions: read
     steps:
+      - name: Validate environment
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          # Runs BEFORE the credentialed checkout and the force-push below, so a
+          # bad environment never reaches either. Validated against E2E_ACCOUNTS
+          # so this list cannot drift from the one the resolve step uses.
+          if ! grep -qE "^${TARGET_ENV}=" <<< "$E2E_ACCOUNTS"; then
+            echo "::error::Unknown environment: $TARGET_ENV"
+            echo "Known environments: $(cut -d= -f1 <<< "$E2E_ACCOUNTS" | tr '\n' ' ')"
+            exit 1
+          fi
+
       # Credentials persist intentionally — the next step pushes to the env branch
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # zizmor: ignore[artipacked]
         with:
@@ -269,6 +318,7 @@ jobs:
 
 
   e2e:
+    name: Run CodeBuild E2E
     needs: [check-changes, deploy]
     if: |
       always() &&
@@ -288,11 +338,12 @@ jobs:
     # the job runs in that caller-repo Environment so it can read its vars/secrets.
     environment: ${{ inputs.gh_environment }}
     permissions:
+      # Required for assuming the per-environment AWS OIDC role.
       id-token: write
       contents: read
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
 
@@ -303,24 +354,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Environment → AWS account mapping.
-          # The E2E infra (CodeBuild, OIDC role, S3 bucket) comes from
-          # infrastructure/tdp-e2e.yaml, deployed either as a substack of the TDP
-          # service stack via EnableE2E=true or as a standalone stack.
-          # Account IDs and regions are stable infrastructure facts.
-          declare -A ACCOUNTS=(
-            [predev]=611255221147
-            [predev2]=383434869204
-            [predev3]=866984931759
-            [predev4]=456932089055
-            [predev5]=734018046548
-            [predev6]=326392129485
-            [predev7]=901926888715
-            [predev8]=581141123528
-            [dev]=706717599419
-            [preuat]=555180171822
-            [uat]=753968983172
-          )
+          # Account comes from the workflow-level E2E_ACCOUNTS map — see the
+          # comment on it. Regions and CF environments below are overrides on
+          # top of it, listing only the environments that differ from the
+          # default, so they are intentionally short rather than incomplete.
+          ACCOUNT=$(awk -F= -v e="$TARGET_ENV" '$1 == e { print $2 }' <<< "$E2E_ACCOUNTS")
 
           declare -A REGIONS=(
             [preuat]=us-west-2
@@ -334,7 +372,6 @@ jobs:
             [uat]=uat
           )
 
-          ACCOUNT="${ACCOUNTS[$TARGET_ENV]:-}"
           REGION="${REGIONS[$TARGET_ENV]:-us-east-2}"
           CF_ENV="${CF_ENVIRONMENTS[$TARGET_ENV]:-development}"
 
@@ -352,7 +389,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           aws-region: ${{ steps.env.outputs.region }}
           role-to-assume: arn:aws:iam::${{ steps.env.outputs.account }}:role/gha-tdp-e2e-${{ steps.env.outputs.cf_env }}
@@ -572,7 +609,7 @@ jobs:
           fi
 
       - name: Fetch CodeBuild logs
-        if: always() && steps.wait.outputs.log_stream != ''
+        if: always() && inputs.stream_codebuild_logs == true && steps.wait.outputs.log_stream != ''
         env:
           LOG_GROUP: ${{ steps.wait.outputs.log_group }}
           LOG_STREAM: ${{ steps.wait.outputs.log_stream }}

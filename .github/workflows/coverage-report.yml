@@ -50,14 +50,19 @@ permissions:
 
 jobs:
   coverage:
+    name: Coverage report
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required to create/update the PR coverage comment.
+      pull-requests: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ inputs.node_version }}
 
@@ -84,9 +89,224 @@ jobs:
           COVERAGE_SCRIPT: ${{ inputs.coverage_script }}
         run: yarn run "$COVERAGE_SCRIPT"
 
-      - name: Coverage check
-        uses: tetrascience/ts-ci-cd-lib/coverage-check@main
+      - name: Upload base coverage for PR comparison
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          new-code-threshold: ${{ inputs.new_code_threshold }}
-          source-file-pattern: ${{ inputs.source_file_pattern }}
-          source-file-exclude: ${{ inputs.source_file_exclude }}
+          name: base-coverage
+          path: coverage/coverage-summary.json
+          retention-days: 90
+          overwrite: true
+
+      - name: Install jq (if not present)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v jq &> /dev/null; then
+            echo "jq already installed: $(jq --version)"
+            exit 0
+          fi
+
+          # GitHub-hosted runners ship jq, so this fallback is for self-hosted.
+          # Installs under RUNNER_TEMP rather than /usr/local/bin: that directory
+          # is root-owned on some runners, and this step has no sudo. --fail is
+          # load-bearing — without it a 404 writes an HTML error page to the
+          # target and chmod +x turns it into a "jq" that fails later, somewhere
+          # else, with a parse error instead of a download error.
+          echo "Installing jq..."
+          ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
+          JQ_DIR="${RUNNER_TEMP}/jq-bin"
+          mkdir -p "$JQ_DIR"
+          curl --fail --show-error --silent --location \
+            -o "$JQ_DIR/jq" \
+            "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-${ARCH}"
+          chmod +x "$JQ_DIR/jq"
+          # Verify by absolute path: GITHUB_PATH only affects LATER steps.
+          echo "Installed: $("$JQ_DIR/jq" --version)"
+          echo "$JQ_DIR" >> "$GITHUB_PATH"
+
+      - name: Resolve caller workflow
+        if: github.event_name == 'pull_request'
+        id: resolve-workflow
+        shell: bash
+        env:
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          WORKFLOW=$(echo "$WORKFLOW_REF" | sed 's|.*\.github/workflows/||; s|@.*||')
+          echo "workflow=$WORKFLOW" >> "$GITHUB_OUTPUT"
+
+      - name: Download base coverage from main
+        if: github.event_name == 'pull_request'
+        uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
+        with:
+          name: base-coverage
+          branch: main
+          workflow: ${{ steps.resolve-workflow.outputs.workflow }}
+          path: base-coverage/
+          github_token: ${{ github.token }}
+        continue-on-error: true
+        id: base-download
+
+      - name: Delete previous coverage comment
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          COMMENT_ID=$(curl -s -H "Authorization: token ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            | jq -r '.[] | select(.body | contains("vitest-coverage-report-marker")) | .id' | head -1)
+          if [ -n "$COMMENT_ID" ]; then
+            curl -s -X DELETE -H "Authorization: token ${GH_TOKEN}" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}"
+            echo "Deleted previous coverage comment ($COMMENT_ID)"
+          fi
+
+      - name: Report coverage on PR
+        if: github.event_name == 'pull_request'
+        uses: davelosert/vitest-coverage-report-action@2500dafcee7dd64f85ab689c0b83798a8359770e # v2.9.3
+        with:
+          json-summary-path: coverage/coverage-summary.json
+          json-final-path: coverage/coverage-final.json
+          json-summary-compare-path: ${{ steps.base-download.outcome == 'success' && 'base-coverage/coverage-summary.json' || '' }}
+          threshold-icons: '{"0": "🔴", "1": "🟢"}'
+
+      - name: Enforce coverage rules
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_CODE_THRESHOLD: ${{ inputs.new_code_threshold }}
+          SOURCE_FILE_PATTERN: ${{ inputs.source_file_pattern }}
+          SOURCE_FILE_EXCLUDE: ${{ inputs.source_file_exclude }}
+          COVERAGE_PATH: coverage/
+          BASE_DOWNLOAD_OUTCOME: ${{ steps.base-download.outcome }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          FAILED=0
+
+          if [ ! -f "${COVERAGE_PATH}coverage-summary.json" ]; then
+            echo "::error::${COVERAGE_PATH}coverage-summary.json not found"
+            exit 1
+          fi
+
+          if [ "$BASE_DOWNLOAD_OUTCOME" = "success" ] && [ -f base-coverage/coverage-summary.json ]; then
+            BASE_LINES=$(jq '.total.lines.pct' base-coverage/coverage-summary.json)
+            PR_LINES=$(jq '.total.lines.pct' "${COVERAGE_PATH}coverage-summary.json")
+
+            echo "Base coverage: ${BASE_LINES}%"
+            echo "PR coverage:   ${PR_LINES}%"
+
+            if jq -en --argjson pr "$PR_LINES" --argjson base "$BASE_LINES" '$pr < $base' > /dev/null 2>&1; then
+              echo "::error::Overall line coverage decreased from ${BASE_LINES}% to ${PR_LINES}%"
+              FAILED=1
+            fi
+          else
+            echo "No base coverage found — skipping regression check"
+          fi
+
+          THRESHOLD=$(echo "$NEW_CODE_THRESHOLD" | awk '{printf "%d", $1}')
+          if [ "$THRESHOLD" -gt 0 ]; then
+            if [ ! -f "${COVERAGE_PATH}coverage-final.json" ]; then
+              echo "::error::${COVERAGE_PATH}coverage-final.json not found but new-code threshold is ${THRESHOLD}%"
+              exit 1
+            fi
+
+            # A failure here must never look like "no files changed": zero files
+            # reaching the loop below makes the threshold check pass silently.
+            #
+            # This mirrors coverage-check/action.yml (#33) deliberately — the
+            # inlined path needs its own guard because this workflow no longer
+            # calls that action, so the two are parallel implementations of one
+            # rule, not a duplicate to delete. Kept byte-comparable so they can
+            # be diffed.
+            #
+            # Status is checked explicitly rather than inferred from the body:
+            # an empty body (network failure) makes `jq -r` exit 0 printing
+            # nothing, which is the silent-pass case; an error object or HTML
+            # page makes it exit non-zero, which merely aborts loudly.
+            CHANGED_FILES=""
+            URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100"
+            HEADERS=$(mktemp)
+            BODY=$(mktemp)
+            while [ -n "$URL" ]; do
+              STATUS=$(curl -sS -o "$BODY" -D "$HEADERS" -w '%{http_code}' \
+                -H "Authorization: token ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "$URL" || echo "000")
+
+              if [ "$STATUS" != "200" ]; then
+                echo "::error::Could not list changed files for PR #${PR_NUMBER} (HTTP ${STATUS}). Refusing to report a pass from an incomplete file list."
+                rm -f "$HEADERS" "$BODY"
+                exit 1
+              fi
+
+              if ! PAGE=$(jq -er '.[] | select(.status != "removed") | .filename' "$BODY" 2>/dev/null); then
+                # `-e` also makes an empty array non-zero; that is a legitimate
+                # empty page, not an error, so only a malformed body is fatal.
+                if ! jq -e 'type == "array"' "$BODY" > /dev/null 2>&1; then
+                  echo "::error::Unexpected response listing changed files for PR #${PR_NUMBER}."
+                  rm -f "$HEADERS" "$BODY"
+                  exit 1
+                fi
+                PAGE=""
+              fi
+
+              if [ -n "$PAGE" ]; then
+                CHANGED_FILES+="$PAGE"$'\n'
+              fi
+              URL=$(sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' "$HEADERS")
+            done
+            rm -f "$HEADERS" "$BODY"
+
+            # An empty exclude pattern must exclude NOTHING. `grep -vE ""`
+            # matches every line, so passing source_file_exclude: '' — the
+            # obvious way to say "exclude nothing" — silently filtered out every
+            # file and disabled this threshold check altogether.
+            if [ -n "$SOURCE_FILE_EXCLUDE" ]; then
+              EXCLUDE_FILTER=(grep -vE "$SOURCE_FILE_EXCLUDE")
+            else
+              EXCLUDE_FILTER=(cat)
+            fi
+
+            echo "$CHANGED_FILES" \
+              | grep -E "$SOURCE_FILE_PATTERN" \
+              | "${EXCLUDE_FILTER[@]}" \
+              | grep -vE '/index\.(ts|tsx)$' \
+              | while IFS= read -r file; do
+                PCT=$(jq -r --arg f "$file" '
+                  to_entries[]
+                  | select(.key | endswith($f))
+                  | .value.s
+                  | to_entries
+                  | if length == 0 then 100
+                    else ([.[].value] | (map(select(. > 0)) | length) / length * 100)
+                    end
+                ' "${COVERAGE_PATH}coverage-final.json" 2>/dev/null)
+
+                if [ -z "$PCT" ] || [ "$PCT" = "null" ]; then
+                  echo "Skipping $file — not in coverage scope"
+                else
+                  FLOORED=$(echo "$PCT" | awk '{printf "%d", $1}')
+                  if [ "$FLOORED" -lt "$THRESHOLD" ]; then
+                    echo "::error file=$file::New/changed code coverage is ${FLOORED}% (required: ${THRESHOLD}%). Add tests to cover the new lines in this file."
+                    echo "FAILED" >> /tmp/coverage-check-failed
+                  fi
+                fi
+              done || true
+
+            if [ -f /tmp/coverage-check-failed ]; then
+              FAILED=1
+              rm -f /tmp/coverage-check-failed
+            fi
+          fi
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo "::error::Coverage checks failed. See above for details."
+            exit 1
+          fi
+
+          echo "All coverage checks passed."

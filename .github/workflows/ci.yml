@@ -11,4 +11,5 @@ permissions:
 
 jobs:
   ghactionlint:
+    name: GitHub Actions lint
     uses: ./.github/workflows/ghactionlint.yml
