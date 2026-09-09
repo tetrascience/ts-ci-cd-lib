@@ -206,11 +206,25 @@ jobs:
               exit 1
             fi
 
+            # A failure here must never look like "no files changed": zero files
+            # reaching the loop below makes the threshold check pass silently.
+            # Empty is the dangerous body, not a JSON error object — `jq -r`
+            # exits 0 on empty input and prints nothing, whereas an error object
+            # or an HTML page makes it exit non-zero and `set -e` aborts. So
+            # both the transfer and the shape are checked explicitly.
             CHANGED_FILES=""
             URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100"
             while [ -n "$URL" ]; do
-              RESP=$(curl -s -D /tmp/coverage-headers -H "Authorization: token ${GH_TOKEN}" "$URL")
-              CHANGED_FILES+=$(echo "$RESP" | jq -r '.[] | select(.status != "removed") | .filename')$'\n'
+              if ! RESP=$(curl --fail --silent --show-error -D /tmp/coverage-headers \
+                    -H "Authorization: token ${GH_TOKEN}" "$URL"); then
+                echo "::error::Could not list the PR's changed files (${URL}). Refusing to report new-code coverage against an unknown file list."
+                exit 1
+              fi
+              if ! jq -e 'type == "array"' <<<"$RESP" >/dev/null 2>&1; then
+                echo "::error::Expected a JSON array of changed files from ${URL}, got: $(head -c 200 <<<"$RESP")"
+                exit 1
+              fi
+              CHANGED_FILES+=$(jq -r '.[] | select(.status != "removed") | .filename' <<<"$RESP")$'\n'
               URL=$(sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' /tmp/coverage-headers)
             done
             rm -f /tmp/coverage-headers
