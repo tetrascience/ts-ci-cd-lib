@@ -33,7 +33,13 @@ on:
         type: string
         required: false
       timeout_minutes:
-        description: "Max minutes for the E2E job — includes buffer for setup steps"
+        description: >-
+          Max minutes for the GitHub-side E2E job: the runner's own
+          timeout-minutes and the "Wait for CodeBuild" poll budget. This does
+          NOT cap the CodeBuild build itself — use build_timeout_minutes for
+          that. Keep it comfortably ABOVE build_timeout_minutes so the runner
+          outlives the build and can report a real TIMED_OUT status instead of
+          being killed first.
         type: number
         default: 25
         required: false
@@ -41,6 +47,47 @@ on:
         description: "Stream raw CodeBuild logs into the GitHub Actions log"
         type: boolean
         default: false
+        required: false
+      build_timeout_minutes:
+        description: >-
+          Max minutes for the CodeBuild build itself, passed as
+          --timeout-in-minutes-override. Leave at 0 to inherit the tdp-e2e
+          project's own timeout (15 minutes). Set this when a suite legitimately
+          runs longer: without it the build is killed at the project default and
+          the log stream simply stops mid-run with no summary, which reads like
+          a hung test rather than a timeout. CodeBuild accepts 5-480.
+        type: number
+        default: 0
+        required: false
+      passthrough_env:
+        description: |
+          Non-secret env vars for the CodeBuild run, one NAME=VALUE per line.
+          Literal or repo-level values only; a `uses:` caller cannot read GitHub
+          Environment values, so for those use gh_environment below instead.
+        type: string
+        default: ""
+        required: false
+      gh_environment:
+        description: |
+          GitHub Environment to source non-secret e2e config from. When set, the
+          e2e job runs in this Environment and forwards every non-empty E2E_* var
+          visible to the job (org, repo, and this Environment, with the Environment
+          winning) into the run. When unset nothing is forwarded, so callers that
+          do not opt in are unchanged. This is how per-environment non-secret config
+          reaches CodeBuild, since a `uses:` caller cannot attach to an Environment.
+          Environment SECRETS do not reach a reusable workflow, so the password
+          comes from the E2E_USER_PASSWORD secret input (a repo or org secret).
+        type: string
+        default: ""
+        required: false
+      slack_mention:
+        description: |
+          Optional Slack mention prepended to a failure message, e.g. "<!channel>",
+          "<!here>", or "<!subteam^S0123ABC>". Left empty the message posts without
+          pinging anyone, so how loud the alert is stays each caller's decision
+          rather than something this shared workflow imposes on every repo.
+        type: string
+        default: ""
         required: false
     secrets:
       JFROG_ARTIFACTORY_NPM_VIRTUAL_URL:
@@ -50,6 +97,21 @@ on:
       GITHUB_PAT:
         description: "PAT with cross-repo access and contents:write for deploy push"
         required: true
+      ZEPHYR_CYCLE_KEY:
+        description: "Optional per-repo Zephyr Scale cycle key. When set, it is passed into the CodeBuild env and takes precedence over the account-scoped SSM cycle key, so a repo's execution results land in its own cycle. Omit to keep the SSM default."
+        required: false
+      ZEPHYR_API_TOKEN:
+        description: "Optional Zephyr Scale API token. Same precedence as ZEPHYR_CYCLE_KEY. Lets a caller supply the token directly instead of relying on the buildspec's own lookup."
+        required: false
+      ZEPHYR_ACCOUNT_ID:
+        description: "Optional Jira account id used for Zephyr executedById. Same precedence as ZEPHYR_CYCLE_KEY."
+        required: false
+      E2E_USER_PASSWORD:
+        description: "Optional password for a dedicated e2e login user. Masked in the Actions log only; it reaches CodeBuild as a plaintext env override (see the README note), so use a dedicated low-privilege user. Must be a repo or org secret: Environment secrets do not reach a reusable workflow (only its vars do, via gh_environment)."
+        required: false
+      SLACK_WEBHOOK_URL:
+        description: "Optional Slack incoming webhook. When set, a failing run posts one message to that webhook's channel; when unset the notify job no-ops, so an unconfigured caller is unaffected and Slack can never turn a run red. Because the webhook is channel-locked, passing it conditionally is also how a caller scopes WHICH runs alert: pass it only when the resolved environment is one you want notified."
+        required: false
 
 permissions:
   contents: read
@@ -61,8 +123,9 @@ permissions:
 # rejected before it could resolve, and one in the list but not the map got its
 # branch force-pushed first and failed afterwards.
 #
-# The E2E infra (CodeBuild, OIDC role, S3 bucket) is deployed as a substack of
-# the TDP service stack via EnableE2E=true. Account IDs are stable
+# The E2E infra (CodeBuild, OIDC role, S3 bucket) comes from
+# infrastructure/tdp-e2e.yaml, deployed either as a substack of the TDP service
+# stack via EnableE2E=true or as a standalone stack. Account IDs are stable
 # infrastructure facts.
 env:
   E2E_ACCOUNTS: |
@@ -76,6 +139,7 @@ env:
     predev8=581141123528
     dev=706717599419
     preuat=555180171822
+    uat=753968983172
 
 jobs:
   check-changes:
@@ -87,6 +151,36 @@ jobs:
     outputs:
       should_deploy: ${{ steps.check.outputs.should_deploy }}
     steps:
+      # Runs before anything else in the job, and this job only runs when
+      # deploy_paths is non-empty — so reaching it at all with a release
+      # environment is the misconfiguration being caught.
+      - name: Reject deploy_paths for release environments
+        env:
+          TARGET_ENV: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+
+          # These environments are released elsewhere, so deploy_paths has no
+          # valid meaning for them. This is a misconfiguration tripwire, not a
+          # safety control: the deploy job pushes to a branch named after the
+          # environment, and nothing in these environments consumes that.
+          #
+          # Without the check the run creates a stray branch and then waits for a
+          # deploy that never starts, until it times out. Failing immediately with
+          # a clear message is cheaper.
+          #
+          # Keep in sync with ACCOUNTS in the e2e job below.
+          RELEASE_ENVIRONMENTS="uat preuat"
+
+          for release_env in $RELEASE_ENVIRONMENTS; do
+            if [[ "$TARGET_ENV" == "$release_env" ]]; then
+              echo "::error::'$TARGET_ENV' is released from ts-cloudformation-service, not deployed by this pipeline, so deploy_paths has no valid meaning here. Pass deploy_paths: '' to run the suite against what is already deployed."
+              exit 1
+            fi
+          done
+
+          echo "$TARGET_ENV is a pipeline-deployed environment; continuing."
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
@@ -145,6 +239,13 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      # Lets the "Wait for deploy" step poll the triggered deploy run via the
+      # built-in GITHUB_TOKEN (gh run list/watch) instead of the cross-repo PAT.
+      # The PAT is still required for the push above (so the deploy workflow's
+      # `on: push` fires — GITHUB_TOKEN-authored pushes don't trigger workflows).
+      # NOTE: callers must also grant `actions: read` at the workflow/job level,
+      # since a reusable workflow's token is capped by the caller's permissions.
+      actions: read
     steps:
       - name: Validate environment
         env:
@@ -186,7 +287,10 @@ jobs:
 
       - name: Wait for deploy
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_PAT }}
+          # Same-repo run-status reads only need the built-in token + actions:read
+          # (see the job `permissions` above). Using the PAT here caused 401s when
+          # it lacked Actions-API validity even though it could still push.
+          GH_TOKEN: ${{ github.token }}
           DEPLOY_BRANCH: ${{ inputs.existing_deploy_branch || inputs.environment }}
           DEPLOY_WORKFLOW: ${{ inputs.deploy_workflow }}
         run: |
@@ -222,6 +326,17 @@ jobs:
       (needs.check-changes.result == 'success' || needs.check-changes.result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.timeout_minutes }}
+    # Surfaced for the notify job below. These are evaluated at the end of the
+    # job, so they are still populated when the job FAILS, which is the only case
+    # that reads them. They stay job outputs rather than workflow_call outputs
+    # because nothing outside this file needs them.
+    outputs:
+      build_id: ${{ steps.codebuild.outputs.build_id }}
+      build_status: ${{ steps.wait.outputs.build_status }}
+      log_link: ${{ steps.wait.outputs.log_link }}
+    # Empty gh_environment means no Environment (backward compatible). When set,
+    # the job runs in that caller-repo Environment so it can read its vars/secrets.
+    environment: ${{ inputs.gh_environment }}
     permissions:
       # Required for assuming the per-environment AWS OIDC role.
       id-token: write
@@ -240,18 +355,21 @@ jobs:
           set -euo pipefail
 
           # Account comes from the workflow-level E2E_ACCOUNTS map — see the
-          # comment on it. Regions and CF environments are overrides on top,
-          # listing only the environments that differ from the default.
+          # comment on it. Regions and CF environments below are overrides on
+          # top of it, listing only the environments that differ from the
+          # default, so they are intentionally short rather than incomplete.
           ACCOUNT=$(awk -F= -v e="$TARGET_ENV" '$1 == e { print $2 }' <<< "$E2E_ACCOUNTS")
 
           declare -A REGIONS=(
             [preuat]=us-west-2
+            [uat]=us-west-2
           )
 
-          # CloudFormation Environment value used in IAM role names.
-          # All predev/dev environments use "development"; preuat uses "preuat".
+          # CloudFormation Environment value used in IAM role names. Must match the
+          # tdp-e2e stack's EnvironmentName for that environment.
           declare -A CF_ENVIRONMENTS=(
             [preuat]=preuat
+            [uat]=uat
           )
 
           REGION="${REGIONS[$TARGET_ENV]:-us-east-2}"
@@ -301,14 +419,128 @@ jobs:
           BUILDSPEC_PATH: ${{ inputs.buildspec }}
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
           COMPUTE_TYPE_OVERRIDE: ${{ inputs.compute_type_override }}
+          BUILD_TIMEOUT_MINUTES: ${{ inputs.build_timeout_minutes }}
+          JOB_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+          ZEPHYR_CYCLE_KEY: ${{ secrets.ZEPHYR_CYCLE_KEY }}
+          ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
+          ZEPHYR_ACCOUNT_ID: ${{ secrets.ZEPHYR_ACCOUNT_ID }}
+          PASSTHROUGH_ENV: ${{ inputs.passthrough_env }}
+          # E2E_* config visible to the job (org, repo, and the selected
+          # Environment, the Environment winning) as JSON; the script forwards it
+          # below. Only populated when gh_environment is set, so callers that do
+          # not opt into an Environment forward nothing, as before. Read in this
+          # job because a `uses:` caller cannot see Environment vars.
+          ENV_VARS_JSON: ${{ inputs.gh_environment != '' && toJSON(vars) || '{}' }}
+          E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
         run: |
           set -euo pipefail
 
-          ENV_VARS=$(jq -nc '[
-            {"name":"E2E_ENVIRONMENT","value":env.TARGET_ENV},
-            {"name":"JFROG_ARTIFACTORY_URL","value":env.JFROG_URL},
-            {"name":"JFROG_ARTIFACTORY_AUTH","value":env.JFROG_AUTH}
-          ]')
+          ENV_VARS='[]'
+
+          # Non-secret vars from passthrough_env, one NAME=VALUE per line. Blank
+          # lines are ignored; everything after the first "=" is the value, and
+          # surrounding whitespace on name and value is trimmed. Appended FIRST so
+          # the reserved vars below always win on a name collision (see the dedupe
+          # at the end). An invalid name fails fast with a clear message.
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"
+            [[ -z "$line" || "$line" != *"="* ]] && continue
+            name="${line%%=*}"
+            value="${line#*=}"
+            name="${name#"${name%%[![:space:]]*}"}"          # ltrim name
+            name="${name%"${name##*[![:space:]]}"}"          # rtrim name
+            value="${value#"${value%%[![:space:]]*}"}"        # ltrim value
+            value="${value%"${value##*[![:space:]]}"}"        # rtrim value
+            [[ -z "$name" ]] && continue
+            if [[ ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo "::error::passthrough_env has an invalid variable name: '$name'"
+              exit 1
+            fi
+            ENV_VARS=$(jq -nc --arg n "$name" --arg v "$value" --argjson base "$ENV_VARS" \
+              '$base + [{"name":$n,"value":$v}]')
+          done <<< "${PASSTHROUGH_ENV:-}"
+
+          # Every non-empty E2E_* var visible to the job, forwarded as-is; new
+          # E2E_* vars flow through with no edit here. Excludes E2E_USER_PASSWORD
+          # so the password only ever travels the masked secret path below, never
+          # as an unmasked variable. Appended before the reserved vars so those
+          # still win a name collision.
+          VARS_JSON="${ENV_VARS_JSON:-}"
+          [[ -z "$VARS_JSON" ]] && VARS_JSON='{}'
+          ENV_VARS=$(jq -nc --argjson base "$ENV_VARS" --argjson vars "$VARS_JSON" '
+            $base + [ $vars | to_entries[]
+              | select(.key | startswith("E2E_")) | select(.key != "E2E_USER_PASSWORD")
+              | select(.value != "")
+              | {name: .key, value: .value} ]')
+
+          # Reserved vars this workflow controls. Appended after passthrough and
+          # the Environment vars so neither can shadow them.
+          ENV_VARS=$(jq -nc --argjson base "$ENV_VARS" \
+            --arg env "$TARGET_ENV" --arg url "$JFROG_URL" --arg auth "$JFROG_AUTH" \
+            '$base + [
+              {"name":"E2E_ENVIRONMENT","value":$env},
+              {"name":"JFROG_ARTIFACTORY_URL","value":$url},
+              {"name":"JFROG_ARTIFACTORY_AUTH","value":$auth}
+            ]')
+
+          # Login password from the E2E_USER_PASSWORD secret INPUT (repo/org
+          # secret; Environment secrets do not reach a reusable workflow).
+          if [[ -n "${E2E_USER_PASSWORD:-}" ]]; then
+            ENV_VARS=$(jq -nc --arg v "$E2E_USER_PASSWORD" --argjson base "$ENV_VARS" \
+              '$base + [{"name":"E2E_USER_PASSWORD","value":$v}]')
+          fi
+
+          # Caller-supplied Zephyr settings, forwarded only when set so the
+          # buildspec can prefer them over its own defaults.
+          #
+          # NOTE for buildspec authors: assigning these unconditionally clobbers
+          # what is passed here. Prefer the inbound value:
+          #   export ZEPHYR_CYCLE_KEY="${ZEPHYR_CYCLE_KEY:-<your fallback>}"
+          for var in ZEPHYR_CYCLE_KEY ZEPHYR_API_TOKEN ZEPHYR_ACCOUNT_ID; do
+            value="${!var:-}"
+            if [[ -n "$value" ]]; then
+              ENV_VARS=$(jq -nc --arg n "$var" --arg v "$value" --argjson base "$ENV_VARS" \
+                '$base + [{"name":$n,"value":$v}]')
+            fi
+          done
+
+          # De-dupe last-wins: two entries with the same name make start-build
+          # reject the whole request. Reserved vars are appended last, so they
+          # win any collision. Order is irrelevant to CodeBuild.
+          ENV_VARS=$(jq -c 'reduce .[] as $e ({}; .[$e.name] = $e.value)
+            | to_entries | map({name: .key, value: .value})' <<< "$ENV_VARS")
+
+          # Integers first, before ANY arithmetic. `[[ -gt ]]` and (( )) abort
+          # the step with a raw bash error on an empty, fractional or
+          # leading-zero value — precisely the unhelpful failure the rest of
+          # this block exists to prevent. All three are reachable:
+          # workflow_call `type: number` accepts floats, an expression that
+          # evaluates to nothing arrives as an empty string, and a zero-padded
+          # "08" is read as octal (`((: 08: value too great for base`), so the
+          # pattern rejects leading zeros rather than just non-digits.
+          if [[ ! "$JOB_TIMEOUT_MINUTES" =~ ^(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::timeout_minutes must be a whole number of minutes (got '$JOB_TIMEOUT_MINUTES')"
+            exit 1
+          fi
+          if [[ ! "$BUILD_TIMEOUT_MINUTES" =~ ^(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::build_timeout_minutes must be a whole number of minutes, or 0 to inherit the tdp-e2e project timeout (got '$BUILD_TIMEOUT_MINUTES')"
+            exit 1
+          fi
+
+          # Fail fast and locally on a misconfigured budget: CodeBuild would
+          # reject an out-of-range value with a generic API error, and a build
+          # cap at or above the GitHub-side wait means the runner is killed
+          # first — losing the TIMED_OUT status that explains the failure.
+          if [[ "$BUILD_TIMEOUT_MINUTES" -gt 0 ]]; then
+            if (( BUILD_TIMEOUT_MINUTES < 5 || BUILD_TIMEOUT_MINUTES > 480 )); then
+              echo "::error::build_timeout_minutes must be between 5 and 480 (got $BUILD_TIMEOUT_MINUTES)"
+              exit 1
+            fi
+            if (( BUILD_TIMEOUT_MINUTES >= JOB_TIMEOUT_MINUTES )); then
+              echo "::error::build_timeout_minutes ($BUILD_TIMEOUT_MINUTES) must be LESS than timeout_minutes ($JOB_TIMEOUT_MINUTES), or the runner is killed before the build can report TIMED_OUT"
+              exit 1
+            fi
+          fi
 
           CMD=(aws codebuild start-build
             --project-name tdp-e2e
@@ -322,6 +554,10 @@ jobs:
           fi
           if [[ -n "$COMPUTE_TYPE_OVERRIDE" ]]; then
             CMD+=(--compute-type-override "$COMPUTE_TYPE_OVERRIDE")
+          fi
+          # 0 = inherit the project's own timeout. Anything else caps THIS build.
+          if [[ "$BUILD_TIMEOUT_MINUTES" -gt 0 ]]; then
+            CMD+=(--timeout-in-minutes-override "$BUILD_TIMEOUT_MINUTES")
           fi
 
           startBuild=$("${CMD[@]}")
@@ -425,4 +661,139 @@ jobs:
             echo "::error::E2E tests failed — status: $BUILD_STATUS"
             echo "::error::CloudWatch logs: $LOG_LINK"
             exit 1
+          fi
+
+  # Post one message to Slack when a run fails.
+  #
+  # This lives here rather than in each caller for two reasons. It is written once
+  # for every consuming repo instead of copied per repo, and the CodeBuild build id
+  # and CloudWatch deep link only exist inside this workflow: it declares no
+  # workflow_call outputs, so a caller-side job can observe nothing but the called
+  # job's pass/fail and could never name the build that failed.
+  #
+  # A separate job rather than a step in e2e, so a failed DEPLOY is covered too:
+  # when deploy fails the e2e job is skipped entirely and any step inside it would
+  # never run.
+  notify:
+    needs: [check-changes, deploy, e2e]
+    # Deliberately keyed off job results, not a test step, so every failing path
+    # alerts: a failed deploy, CodeBuild FAILED/TIMED_OUT/FAULT/STOPPED, and an
+    # infrastructure error in the e2e job (assume-role, source upload) that never
+    # reaches CodeBuild at all. check-changes is in needs only to complete the
+    # dependency chain; its own failure surfaces as e2e being skipped, not failed,
+    # and a skipped e2e is not a test failure worth paging a channel over.
+    if: always() && (needs.deploy.result == 'failure' || needs.e2e.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post failure to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          MENTION: ${{ inputs.slack_mention }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          # Empty when the deploy failed, since the e2e job never started.
+          BUILD_ID: ${{ needs.e2e.outputs.build_id }}
+          BUILD_STATUS: ${{ needs.e2e.outputs.build_status }}
+          LOG_LINK: ${{ needs.e2e.outputs.log_link }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          WORKFLOW: ${{ github.workflow }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+          # On a pull_request run, github.ref_name is the merge ref ("36/merge"),
+          # not a branch, so it would render as a branch name that does not exist.
+          # head_ref is the actual source branch and is set only for
+          # pull_request/pull_request_target, which is exactly the case guarded by
+          # PR_URL being non-empty below.
+          HEAD_REF: ${{ github.head_ref }}
+          SHA: ${{ github.sha }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # A caller that passes no webhook gets no alert, and never a red run
+          # because of Slack. This is also the scoping mechanism: callers pass the
+          # secret only for the environments they want notified.
+          if [[ -z "$SLACK_WEBHOOK_URL" ]]; then
+            echo "No SLACK_WEBHOOK_URL supplied; skipping the Slack alert."
+            exit 0
+          fi
+
+          # Distinguish the two failure shapes. A deploy failure has no build to
+          # point at, so claiming a CodeBuild status would be a lie.
+          if [[ "$DEPLOY_RESULT" == "failure" ]]; then
+            HEADLINE="e2e DEPLOY FAILED"
+            CAUSE="The deploy never completed, so the suite did not run."
+            # Documented defect in this workflow, called out so a re-run's
+            # inevitable failure is not read as a product regression: "Push to
+            # environment branch" is a no-op when the env branch already points at
+            # this SHA, so no deploy event fires, no run matches the headSha, and
+            # "Wait for deploy" times out. Re-running a green commit always fails
+            # here.
+            CAUSE="$CAUSE If this was a re-run of an already-deployed commit, this workflow cannot be re-run and this failure is expected rather than a real break."
+          else
+            HEADLINE="e2e FAILED"
+            CAUSE="CodeBuild status: ${BUILD_STATUS:-unknown (the run failed before the build reported)}"
+          fi
+
+          # Prefer the PR link when the run came from a pull_request; otherwise the
+          # branch is the useful pointer.
+          if [[ -n "$PR_URL" ]]; then
+            # Fall back to REF only if head_ref is somehow empty while PR_URL is set.
+            WHERE="<${PR_URL}|PR> on branch \`${HEAD_REF:-$REF}\` @ \`${SHA:0:7}\`"
+          else
+            WHERE="branch \`${REF}\` @ \`${SHA:0:7}\`"
+          fi
+
+          LINKS="<${RUN_URL}|GitHub run>"
+          if [[ -n "$LOG_LINK" && "$LOG_LINK" != "null" ]]; then
+            LINKS="${LINKS} · <${LOG_LINK}|CloudWatch logs>"
+          fi
+          if [[ -n "$BUILD_ID" ]]; then
+            BUILD_LINE="Build \`${BUILD_ID}\`"
+          else
+            BUILD_LINE="No CodeBuild build was started."
+          fi
+
+          # jq builds the payload because every interpolated value here (branch
+          # name, workflow name) is attacker-influenced text, and hand-quoting
+          # JSON around it produces both broken payloads and injection.
+          PAYLOAD=$(jq -nc \
+            --arg mention "${MENTION:+$MENTION }" \
+            --arg headline "$HEADLINE" \
+            --arg repo "$REPO" \
+            --arg wf "$WORKFLOW" \
+            --arg env "$ENVIRONMENT" \
+            --arg cause "$CAUSE" \
+            --arg where "$WHERE" \
+            --arg build "$BUILD_LINE" \
+            --arg links "$LINKS" \
+            '{
+               text: ($mention + ":rotating_light: " + $headline + " — " + $repo + " @ " + $env),
+               blocks: [{
+                 type: "section",
+                 text: {
+                   type: "mrkdwn",
+                   text: ($mention + ":rotating_light: *" + $headline + "* — `" + $repo
+                          + "` @ *" + $env + "*\n"
+                          + $wf + " · " + $where + "\n"
+                          + $cause + "\n" + $build + "\n" + $links)
+                 }
+               }]
+             }')
+
+          # Posting is best effort and must never be the reason a run looks broken.
+          # Bounded time so a hanging Slack cannot sit on a runner, a couple of
+          # retries for a transient blip, and a warning rather than a failure if it
+          # still does not go through: the real e2e failure is already reported by
+          # the e2e job, and a red notify job on top of it only obscures that.
+          RC=0
+          printf '%s' "$PAYLOAD" \
+            | curl -sS --fail-with-body \
+                --max-time 15 --retry 2 --retry-delay 2 --retry-connrefused \
+                -X POST -H 'Content-type: application/json' --data @- "$SLACK_WEBHOOK_URL" || RC=$?
+
+          if [[ "$RC" -eq 0 ]]; then
+            echo "Posted the failure to Slack."
+          else
+            echo "::warning::Could not post to Slack (curl exit $RC). The e2e failure itself is reported by the e2e job."
           fi

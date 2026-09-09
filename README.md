@@ -10,6 +10,8 @@ Reusable CI/CD workflows for TetraScience repositories.
   - [publish-npm-package](#publish-npm-package)
   - [check-links](#check-links)
   - [e2e-codebuild](#e2e-codebuild)
+- [Actions](#actions)
+  - [install-jfrog-npm-package](#install-jfrog-npm-package)
 
 ## Workflows
 
@@ -292,22 +294,87 @@ phases:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `environment` | **Yes** | | Target environment (e.g. `predev5`, `dev`) |
-| `deploy_paths` | **Yes** | | Globs that trigger deploy. Empty = skip deploy. |
+| `environment` | **Yes** | | Target environment. One of `predev`, `predev2`…`predev8`, `dev`, `preuat`, `uat`. |
+| `deploy_paths` | **Yes** | | Globs that trigger deploy. Empty = never deploy (observe-only, see below). |
 | `buildspec` | **Yes** | | Path to buildspec in the caller repo |
 | `deploy_workflow` | No | `ci.yml` | Workflow waited on after pushing to env branch |
 | `image_override` | No | | Override CodeBuild image |
 | `compute_type_override` | No | | Override CodeBuild compute (e.g. `BUILD_GENERAL1_MEDIUM`) |
 | `stream_codebuild_logs` | No | `false` | Stream raw CodeBuild logs into the GitHub Actions log |
 | `timeout_minutes` | No | `25` | Max minutes for the E2E job |
+| `passthrough_env` | No | | Extra **non-secret** env vars for the run, one `NAME=VALUE` per line. See below. |
+| `gh_environment` | No | | GitHub Environment to source per-env config from. The e2e job runs in it and forwards every `E2E_*` **variable** into the run. See below. |
 
 #### Secrets
 
-| Secret | Description |
-|--------|-------------|
-| `JFROG_ARTIFACTORY_NPM_VIRTUAL_URL` | JFrog npm registry URL |
-| `JFROG_ARTIFACTORY_READ_NPM_AUTH` | JFrog npm credentials |
-| `GITHUB_PAT` | PAT for cross-repo access + deploy push |
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `JFROG_ARTIFACTORY_NPM_VIRTUAL_URL` | **Yes** | JFrog npm registry URL |
+| `JFROG_ARTIFACTORY_READ_NPM_AUTH` | **Yes** | JFrog npm credentials |
+| `GITHUB_PAT` | **Yes** | PAT for cross-repo access + deploy push |
+| `ZEPHYR_CYCLE_KEY` | No | Cycle to record into |
+| `ZEPHYR_API_TOKEN` | No | Zephyr Scale API token |
+| `ZEPHYR_ACCOUNT_ID` | No | Jira account id for `executedById` |
+| `E2E_USER_PASSWORD` | No | Password for a dedicated e2e login user. Masked in the Actions log; reaches CodeBuild as a plaintext env override (see the note below). |
+
+The Zephyr secrets and `E2E_USER_PASSWORD` are forwarded as CodeBuild environment variables
+**only when non-empty**, so omitting them leaves the buildspec's own lookups in charge. Pass
+them when the caller already holds these values as GitHub secrets.
+
+Note on `E2E_USER_PASSWORD`: it is masked in the GitHub Actions log, but it is forwarded as a
+plaintext CodeBuild environment override, so it appears in cleartext in the target account's
+CloudTrail `StartBuild` request and on the build's environment in the CodeBuild console. Use a
+dedicated low-privilege e2e user, not a shared credential.
+
+#### Passing per-environment config
+
+The suite runs inside CodeBuild, so GitHub Environment values do not reach the test process on
+their own; only what this workflow forwards does. There are two ways to forward config, and they
+compose.
+
+**`gh_environment` (recommended for per-environment config).** Set it to a GitHub Environment
+name. The e2e job then runs in that Environment and forwards **every non-empty `E2E_*` variable
+visible to the job** (org, repo, and the selected Environment, with the Environment winning) into
+the run, with no per-variable wiring here. Add a new `E2E_*` var and it flows through
+automatically. When `gh_environment` is unset nothing is forwarded, so callers that do not opt in
+are unchanged. `E2E_USER_PASSWORD` is never forwarded as a variable even if set as one; it travels
+only through the masked secret input. A `uses:` caller cannot read Environment `vars` itself, which
+is why this reads them inside the job.
+
+```yaml
+with:
+  environment: uat
+  deploy_paths: ''
+  buildspec: buildspec.e2e.yml
+  gh_environment: uat        # forwards every E2E_* var visible to the job
+secrets:
+  # a repo or org secret; Environment secrets do not reach a reusable workflow
+  E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
+```
+
+**`passthrough_env` (for literal or repo-level values).** One `NAME=VALUE` per line, blanks
+ignored, everything after the first `=` is the value. Use it for values the caller holds directly
+(literals or repo-level `vars`), not Environment vars:
+
+```yaml
+with:
+  passthrough_env: |
+    E2E_WEBAPP_ORIGIN=https://example.test
+    E2E_ORG_SLUG=${{ vars.E2E_ORG_SLUG }}   # a repo-level var, not an Environment var
+```
+
+Precedence when a name comes from more than one source (last wins): `passthrough_env`, then
+Environment `E2E_*` vars, then the reserved vars this workflow controls (`E2E_ENVIRONMENT`,
+`JFROG_ARTIFACTORY_*`). So the Environment overrides passthrough, and the reserved vars override
+both. **Never put secrets in `passthrough_env`**: `with:` inputs are not masked in logs. Secrets
+go through declared `secrets:` inputs, which is why the password is separate. Unset values
+interpolate to empty and are dropped; have the suite treat blank as unset.
+
+> **Buildspec authors:** a buildspec that assigns these unconditionally will clobber
+> what the workflow passes. Prefer the inbound value:
+> ```sh
+> export ZEPHYR_CYCLE_KEY="${ZEPHYR_CYCLE_KEY:-$(aws ssm get-parameter ... || echo "")}"
+> ```
 
 #### How it works
 
@@ -315,6 +382,88 @@ phases:
 2. **deploy** — pushes to the env branch, waits for the deploy workflow to complete. Skipped if no service code changed.
 3. **e2e** — uploads source to S3, triggers CodeBuild, writes job summary, and links CloudWatch logs. Raw log streaming is opt-in with `stream_codebuild_logs`.
 
+#### Observe-only mode
+
+Passing `deploy_paths: ''` skips **check-changes** and **deploy**, leaving only the
+CodeBuild run. Use it against environments this pipeline does not deploy, so the suite
+verifies what is already there rather than what a PR would ship. Those environments
+reject a non-empty `deploy_paths` outright.
+
+Pair it with a `workflow_dispatch` trigger in the caller. The caller workflow must exist
+on whichever branch you dispatch from.
+
+```yaml
+on:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    uses: tetrascience/ts-ci-cd-lib/.github/workflows/e2e-codebuild.yml@main
+    with:
+      environment: uat
+      deploy_paths: ''
+      buildspec: buildspec.e2e.yml
+    secrets: ...
+```
+
+`GITHUB_PAT` is still declared required even though nothing uses it once the deploy job
+is skipped.
+
 #### Infrastructure
 
-The shared CodeBuild project (`tdp-e2e`) must be deployed per environment via `EnableE2E=true` in the TDP service stack. See [`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml).
+The shared CodeBuild project (`tdp-e2e`) must exist in the target account before an
+environment can be used. It comes from
+[`ts-cloudformation-service/infrastructure/tdp-e2e.yaml`](https://github.com/tetrascience/ts-cloudformation-service/blob/development/infrastructure/tdp-e2e.yaml),
+deployed either as a substack of the TDP service stack via `EnableE2E=true` or as a
+standalone stack. One project per account serves every repo: source and buildspec are
+per-call overrides, and uploads are namespaced by repo name.
+
+The workflow derives the role and bucket names by convention, so an environment's
+`CF_ENVIRONMENTS` entry must match that stack's `EnvironmentName`.
+
+## Actions
+
+Composite actions are referenced as a **step** (`uses:`) inside your own job, unlike the reusable workflows above (which are referenced at the job level).
+
+### install-jfrog-npm-package
+
+Installs a single npm package that is published **only** to a private JFrog Artifactory registry, as a leaf tarball extracted into an already-installed `node_modules`.
+
+Use this for packages that cannot be added to `package.json` / `yarn.lock` — for example in a repo pinned to the public npm registry, where adding a private dependency would break external contributors' `yarn install`. The action fetches just the one package via `npm pack` and extracts it in place; it deliberately does **not** use `npm install`, which reconciles the whole dependency tree and corrupts a Yarn-managed `node_modules` (`ENOTEMPTY … rmdir node_modules/<pkg>/dist`).
+
+#### Usage
+
+Run it **after** `yarn install` (it extracts into the existing `node_modules`):
+
+```yaml
+steps:
+  - uses: actions/checkout@v4
+  - uses: actions/setup-node@v4
+    with:
+      node-version: "24"
+      cache: "yarn"
+  - run: corepack enable
+  - run: yarn install --immutable
+
+  - name: Install ts-lib-zephyr-nodejs (JFrog)
+    uses: tetrascience/ts-ci-cd-lib/install-jfrog-npm-package@main
+    with:
+      package: ts-lib-zephyr-nodejs
+      version: "0.4.0"
+      # The virtual registry URL is infra info, not a credential — hardcode it
+      # (or pass a non-environment-scoped secret).
+      registry-url: https://<org>.jfrog.io/artifactory/api/npm/<repo>/
+      auth: ${{ secrets.JFROG_ARTIFACTORY_READ_NPM_AUTH }}
+```
+
+#### Inputs
+
+| Input          | Description                                                                                          | Required | Default |
+| -------------- | ---------------------------------------------------------------------------------------------------- | -------- | ------- |
+| `package`      | npm package name to install (e.g. `ts-lib-zephyr-nodejs`). Scoped names are supported.               | Yes      | —       |
+| `version`      | Exact version to install (e.g. `0.4.0`).                                                             | Yes      | —       |
+| `registry-url` | JFrog virtual (read) registry URL, e.g. `https://<org>.jfrog.io/artifactory/api/npm/<repo>/`.        | Yes      | —       |
+| `auth`         | Read-only Artifactory credential; interpreted per `auth-type`. Pass a secret.                        | Yes      | —       |
+| `auth-type`    | npm auth field: `_auth` (base64 `username:password`) or `_authToken` (bearer token).                 | No       | `_auth` |
+
+> **auth-type:** most TetraScience `JFROG_ARTIFACTORY_*_NPM_AUTH` secrets are a base64 `username:password` identity (npm `_auth`, equivalent to Yarn's `npmAuthIdent`) — the default. Set `auth-type: _authToken` only if your credential is a bearer token.
