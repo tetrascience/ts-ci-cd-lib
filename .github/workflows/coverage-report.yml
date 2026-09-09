@@ -93,15 +93,29 @@ jobs:
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
+          set -euo pipefail
           if command -v jq &> /dev/null; then
             echo "jq already installed: $(jq --version)"
-          else
-            echo "Installing jq..."
-            ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
-            curl -sL -o /usr/local/bin/jq "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-${ARCH}"
-            chmod +x /usr/local/bin/jq
-            echo "Installed: $(jq --version)"
+            exit 0
           fi
+
+          # GitHub-hosted runners ship jq, so this fallback is for self-hosted.
+          # Installs under RUNNER_TEMP rather than /usr/local/bin: that directory
+          # is root-owned on some runners, and this step has no sudo. --fail is
+          # load-bearing — without it a 404 writes an HTML error page to the
+          # target and chmod +x turns it into a "jq" that fails later, somewhere
+          # else, with a parse error instead of a download error.
+          echo "Installing jq..."
+          ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
+          JQ_DIR="${RUNNER_TEMP}/jq-bin"
+          mkdir -p "$JQ_DIR"
+          curl --fail --show-error --silent --location \
+            -o "$JQ_DIR/jq" \
+            "https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-linux-${ARCH}"
+          chmod +x "$JQ_DIR/jq"
+          # Verify by absolute path: GITHUB_PATH only affects LATER steps.
+          echo "Installed: $("$JQ_DIR/jq" --version)"
+          echo "$JQ_DIR" >> "$GITHUB_PATH"
 
       - name: Resolve caller workflow
         if: github.event_name == 'pull_request'
@@ -201,9 +215,19 @@ jobs:
             done
             rm -f /tmp/coverage-headers
 
+            # An empty exclude pattern must exclude NOTHING. `grep -vE ""`
+            # matches every line, so passing source_file_exclude: '' — the
+            # obvious way to say "exclude nothing" — silently filtered out every
+            # file and disabled this threshold check altogether.
+            if [ -n "$SOURCE_FILE_EXCLUDE" ]; then
+              EXCLUDE_FILTER=(grep -vE "$SOURCE_FILE_EXCLUDE")
+            else
+              EXCLUDE_FILTER=(cat)
+            fi
+
             echo "$CHANGED_FILES" \
               | grep -E "$SOURCE_FILE_PATTERN" \
-              | grep -vE "$SOURCE_FILE_EXCLUDE" \
+              | "${EXCLUDE_FILTER[@]}" \
               | grep -vE '/index\.(ts|tsx)$' \
               | while IFS= read -r file; do
                 PCT=$(jq -r --arg f "$file" '

@@ -54,6 +54,29 @@ on:
 permissions:
   contents: read
 
+# Environment → AWS account. THE single source of truth for which environments
+# this workflow accepts: both the pre-flight validation and the resolve step
+# read it, so an env can never pass one and fail the other. That drift had a
+# bad direction — an env in the resolve map but not the pre-flight list was
+# rejected before it could resolve, and one in the list but not the map got its
+# branch force-pushed first and failed afterwards.
+#
+# The E2E infra (CodeBuild, OIDC role, S3 bucket) is deployed as a substack of
+# the TDP service stack via EnableE2E=true. Account IDs are stable
+# infrastructure facts.
+env:
+  E2E_ACCOUNTS: |
+    predev=611255221147
+    predev2=383434869204
+    predev3=866984931759
+    predev4=456932089055
+    predev5=734018046548
+    predev6=326392129485
+    predev7=901926888715
+    predev8=581141123528
+    dev=706717599419
+    preuat=555180171822
+
 jobs:
   check-changes:
     name: Check deploy changes
@@ -128,14 +151,14 @@ jobs:
           TARGET_ENV: ${{ inputs.environment }}
         run: |
           set -euo pipefail
-          case "$TARGET_ENV" in
-            predev|predev2|predev3|predev4|predev5|predev6|predev7|predev8|dev|preuat)
-              ;;
-            *)
-              echo "::error::Unknown environment: $TARGET_ENV"
-              exit 1
-              ;;
-          esac
+          # Runs BEFORE the credentialed checkout and the force-push below, so a
+          # bad environment never reaches either. Validated against E2E_ACCOUNTS
+          # so this list cannot drift from the one the resolve step uses.
+          if ! grep -qE "^${TARGET_ENV}=" <<< "$E2E_ACCOUNTS"; then
+            echo "::error::Unknown environment: $TARGET_ENV"
+            echo "Known environments: $(cut -d= -f1 <<< "$E2E_ACCOUNTS" | tr '\n' ' ')"
+            exit 1
+          fi
 
       # Credentials persist intentionally — the next step pushes to the env branch
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # zizmor: ignore[artipacked]
@@ -216,22 +239,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Environment → AWS account mapping.
-          # The E2E infra (CodeBuild, OIDC role, S3 bucket) is deployed as a
-          # substack of the TDP service stack via EnableE2E=true.
-          # Account IDs and regions are stable infrastructure facts.
-          declare -A ACCOUNTS=(
-            [predev]=611255221147
-            [predev2]=383434869204
-            [predev3]=866984931759
-            [predev4]=456932089055
-            [predev5]=734018046548
-            [predev6]=326392129485
-            [predev7]=901926888715
-            [predev8]=581141123528
-            [dev]=706717599419
-            [preuat]=555180171822
-          )
+          # Account comes from the workflow-level E2E_ACCOUNTS map — see the
+          # comment on it. Regions and CF environments are overrides on top,
+          # listing only the environments that differ from the default.
+          ACCOUNT=$(awk -F= -v e="$TARGET_ENV" '$1 == e { print $2 }' <<< "$E2E_ACCOUNTS")
 
           declare -A REGIONS=(
             [preuat]=us-west-2
@@ -243,7 +254,6 @@ jobs:
             [preuat]=preuat
           )
 
-          ACCOUNT="${ACCOUNTS[$TARGET_ENV]:-}"
           REGION="${REGIONS[$TARGET_ENV]:-us-east-2}"
           CF_ENV="${CF_ENVIRONMENTS[$TARGET_ENV]:-development}"
 
