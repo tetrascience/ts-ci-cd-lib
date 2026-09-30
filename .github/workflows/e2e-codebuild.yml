@@ -76,7 +76,8 @@ on:
           do not opt in are unchanged. This is how per-environment non-secret config
           reaches CodeBuild, since a `uses:` caller cannot attach to an Environment.
           Environment SECRETS do not reach a reusable workflow, so the password
-          comes from e2e_user_password_parameter below instead.
+          comes from e2e_user_password_parameter below or, when that is empty,
+          from the deprecated E2E_USER_PASSWORD secret (a repo or org secret).
         type: string
         default: ""
         required: false
@@ -102,15 +103,17 @@ on:
       zephyr_api_token_parameter:
         description: |
           SSM parameter holding the Zephyr Scale API token, sent the same way as
-          jfrog_auth_parameter. Takes precedence over the ZEPHYR_API_TOKEN secret.
-          Leave empty (and omit that secret) to let the buildspec do its own lookup.
+          jfrog_auth_parameter. Takes precedence over the ZEPHYR_API_TOKEN secret;
+          when empty, that deprecated secret is still sent as PLAINTEXT if passed.
+          Leave both unset to let the buildspec do its own lookup.
         type: string
         default: ""
         required: false
       e2e_user_password_parameter:
         description: |
           SSM parameter holding the dedicated e2e user's password, sent the same way
-          as jfrog_auth_parameter. Takes precedence over the E2E_USER_PASSWORD secret.
+          as jfrog_auth_parameter. Takes precedence over the E2E_USER_PASSWORD secret;
+          when empty, that deprecated secret is still sent as PLAINTEXT if passed.
           Conventionally /tdp/e2e/<repo>/e2e-user-password.
         type: string
         default: ""
@@ -454,6 +457,8 @@ jobs:
           JFROG_AUTH_PARAMETER: ${{ inputs.jfrog_auth_parameter }}
           ZEPHYR_API_TOKEN_PARAMETER: ${{ inputs.zephyr_api_token_parameter }}
           E2E_USER_PASSWORD_PARAMETER: ${{ inputs.e2e_user_password_parameter }}
+          TARGET_ACCOUNT: ${{ steps.env.outputs.account }}
+          TARGET_REGION: ${{ steps.env.outputs.region }}
           PASSTHROUGH_ENV: ${{ inputs.passthrough_env }}
           # E2E_* config visible to the job (org, repo, and the selected
           # Environment, the Environment winning) as JSON; the script forwards it
@@ -519,8 +524,14 @@ jobs:
           add_secret() {
             local name="$1" parameter="$2" parameter_input="$3" secret_input="$4" value="$5"
             if [[ -n "$parameter" ]]; then
-              if [[ ! "$parameter" =~ ^/tdp/e2e/[A-Za-z0-9_./-]+$ ]]; then
-                echo "::error::$parameter_input must be an SSM parameter name under /tdp/e2e/, the only path the tdp-e2e CodeBuild role can read (got '$parameter')"
+              # SSM's own name rules, so a bad name fails here and not at build start:
+              # non-empty segments of [A-Za-z0-9_.-], at most 15 levels, and at most
+              # 1011 characters counted as the ARN. /tdp/e2e/ also excludes aws/ssm.
+              local levels arn
+              levels=$(tr -cd / <<< "$parameter")
+              arn="arn:aws:ssm:${TARGET_REGION}:${TARGET_ACCOUNT}:parameter${parameter}"
+              if [[ ! "$parameter" =~ ^/tdp/e2e(/[A-Za-z0-9_.-]+)+$ ]] || (( ${#levels} > 15 || ${#arn} > 1011 )); then
+                echo "::error::$parameter_input must be an SSM parameter name under /tdp/e2e/, the only path the tdp-e2e CodeBuild role can read: non-empty segments of letters, digits, '.', '-' or '_', at most 15 levels, and at most 1011 characters including the parameter ARN (got '$parameter')"
                 exit 1
               fi
               if [[ -n "$value" ]]; then

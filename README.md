@@ -322,10 +322,12 @@ console show) hold only the parameter name.
 | `ZEPHYR_API_TOKEN` | `zephyr_api_token_parameter` | none |
 | `E2E_USER_PASSWORD` | `e2e_user_password_parameter` | none |
 
-Parameters must be under `/tdp/e2e/`, the only path the `tdp-e2e` CodeBuild role can read,
-and must exist in the target account and region before a run, or the build fails at start;
-the workflow then prints the failing phase and CodeBuild's reason. The JFrog default is used on
-every run, so it must be seeded in every account that runs e2e.
+Parameters must be under `/tdp/e2e/`, the only path the `tdp-e2e` CodeBuild role can read.
+Names are checked against SSM's own rules before the build starts: non-empty segments of letters,
+digits, `.`, `-` and `_`, at most 15 levels, and at most 1011 characters counting the parameter
+ARN. A parameter must also exist in the target account and region before a run, or the build
+fails at start; the workflow then prints the failing phase and CodeBuild's reason. The JFrog
+default is used on every run, so it must be seeded in every account that runs e2e.
 
 | Secret | Required | Description |
 |--------|----------|-------------|
@@ -358,9 +360,10 @@ name. The e2e job then runs in that Environment and forwards **every non-empty `
 visible to the job** (org, repo, and the selected Environment, with the Environment winning) into
 the run, with no per-variable wiring here. Add a new `E2E_*` var and it flows through
 automatically. When `gh_environment` is unset nothing is forwarded, so callers that do not opt in
-are unchanged. `E2E_USER_PASSWORD` is never forwarded as a variable even if set as one; it travels
-only through `e2e_user_password_parameter`. A `uses:` caller cannot read Environment `vars` itself,
-which is why this reads them inside the job.
+are unchanged. `E2E_USER_PASSWORD` is never forwarded as a variable even if set as one. It travels
+through `e2e_user_password_parameter` or, when that is empty, through the deprecated
+`E2E_USER_PASSWORD` secret, which is sent as `PLAINTEXT` (see Secrets). A `uses:` caller cannot read
+Environment `vars` itself, which is why this reads them inside the job.
 
 ```yaml
 with:
