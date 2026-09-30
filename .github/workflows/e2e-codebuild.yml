@@ -438,29 +438,31 @@ jobs:
           ENV_VARS='[]'
 
           # True when a passthrough name looks like it holds a secret. Matched per
-          # `_` segment, so KEYCLOAK_URL and TOKENIZER pass. KEY after CYCLE,
-          # PROJECT, SUBDOMAIN etc. is an identifier, and a trailing reference
-          # segment (API_KEY_ID, SECRET_ARN, TOKEN_URL) refers to a secret, not holds one.
+          # `_` segment with one trailing S dropped, so every plural matches and
+          # KEYCLOAK_URL or TOKENIZER pass. Only a singular KEY after an identifier
+          # word is exempt, as is a trailing reference segment (API_KEY_ID, SECRET_ARNS).
           secret_like() {
-            local upper i seg hit=""
+            local upper i seg last hit=""
             local -a segs
             upper=$(tr '[:lower:]' '[:upper:]' <<< "$1")
             IFS=_ read -r -a segs <<< "$upper"
             for i in "${!segs[@]}"; do
               seg="${segs[$i]}"
-              case "$seg" in
-                *TOKEN|*TOKENS|*PASSWORD|*PASSWORDS|*PASSWD|*SECRET|*SECRETS) hit=1 ;;
-                PASSPHRASE|*APIKEY|ACCESSKEY|PRIVATEKEY|SECRETKEY) hit=1 ;;
-                KEY|KEYS)
-                  if (( i == 0 )) || [[ ! "${segs[$((i - 1))]}" =~ ^(CYCLE|PROJECT|ISSUE|SUBDOMAIN|CACHE|OBJECT|PARTITION|SORT)$ ]]; then
+              case "${seg%S}" in
+                *TOKEN|*PASSWORD|*PASSWD|*SECRET|*APIKEY) hit=1 ;;
+                ACCESSKEY|PRIVATEKEY|SECRETKEY|PASSPHRASE) hit=1 ;;
+                KEY)
+                  if [[ "$seg" != KEY ]] || (( i == 0 )) ||
+                    [[ ! "${segs[$((i - 1))]}" =~ ^(CYCLE|PROJECT|ISSUE|SUBDOMAIN|CACHE|OBJECT|PARTITION|SORT)$ ]]; then
                     hit=1
                   fi
                   ;;
               esac
             done
             [[ -n "$hit" ]] || return 1
-            case "${segs[${#segs[@]} - 1]}" in
-              ID|IDS|ARN|NAME|PATH|FILE|URL|URI|ENDPOINT|HOST|HEADER|PARAM|PARAMETER|TTL|TYPE) return 1 ;;
+            last="${segs[${#segs[@]} - 1]}"
+            case "${last%S}" in
+              ID|ARN|NAME|PATH|FILE|URL|URI|ENDPOINT|HOST|HEADER|PARAM|PARAMETER|TTL|TYPE) return 1 ;;
             esac
             return 0
           }

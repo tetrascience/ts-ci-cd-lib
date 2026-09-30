@@ -372,15 +372,16 @@ dedicated secret inputs, or the buildspec reads them from SSM under `/tdp/e2e/`.
 interpolate to empty and are dropped; have the suite treat blank as unset.
 
 As a tripwire, a name that looks like a secret fails the run before CodeBuild starts. Names are
-split on `_` and compared case-insensitively. A name is rejected when a segment is, or ends in,
-`TOKEN`, `PASSWORD`, `PASSWD`, `SECRET` (plurals too) or `APIKEY`, or is `KEY`, `KEYS`,
-`ACCESSKEY`, `PRIVATEKEY`, `SECRETKEY` or `PASSPHRASE`. Two exceptions keep identifiers
-usable: a `KEY` right after `CYCLE`, `PROJECT`, `ISSUE`, `SUBDOMAIN`, `CACHE`, `OBJECT`,
-`PARTITION` or `SORT` (e.g. `ZEPHYR_CYCLE_KEY`), and a name whose last segment refers to a
-secret rather than holding one: `ID`, `IDS`, `ARN`, `NAME`, `PATH`, `FILE`, `URL`, `URI`,
-`ENDPOINT`, `HOST`, `HEADER`, `PARAM`, `PARAMETER`, `TTL` or `TYPE` (e.g. `API_KEY_ID`,
-`TOKEN_URL`). So `E2E_API_TOKEN` and `DB_PASSWORD` fail while
-`KEYCLOAK_URL`, `TOKENIZER_MODEL` and `API_KEY_ID` pass. Rename a benign variable that trips it.
+split on `_`, compared case-insensitively, and one trailing `S` is dropped from each segment, so
+every rule below covers the plural too. A name is rejected when a segment is, or ends in, `TOKEN`,
+`PASSWORD`, `PASSWD`, `SECRET` or `APIKEY`, or is `KEY`, `ACCESSKEY`, `PRIVATEKEY`, `SECRETKEY`
+or `PASSPHRASE`. Two exceptions keep identifiers usable: a singular `KEY` right after `CYCLE`,
+`PROJECT`, `ISSUE`, `SUBDOMAIN`, `CACHE`, `OBJECT`, `PARTITION` or `SORT` (e.g.
+`ZEPHYR_CYCLE_KEY`; `PROJECT_KEYS` is still rejected), and a name whose last segment refers to a
+secret rather than holding one: `ID`, `ARN`, `NAME`, `PATH`, `FILE`, `URL`, `URI`, `ENDPOINT`,
+`HOST`, `HEADER`, `PARAM`, `PARAMETER`, `TTL` or `TYPE`, singular or plural (e.g. `API_KEY_ID`,
+`SECRET_ARNS`). So `E2E_API_TOKEN`, `DB_PASSWDS` and `PROJECT_KEYS` fail while `KEYCLOAK_URL`,
+`TOKENIZER_MODEL`, `MONKEYS` and `API_KEY_ID` pass. Rename a benign variable that trips it.
 
 > **Buildspec authors:** a buildspec that assigns these unconditionally will clobber
 > what the workflow passes. Prefer the inbound value:
