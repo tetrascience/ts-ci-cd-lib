@@ -40,6 +40,12 @@ jobs:
 
 Both binaries are downloaded from GitHub release assets and verified against pinned SHA-256 hashes. To bump either tool, set the `*_version` input alongside the matching `*_sha256`.
 
+#### zizmor online audits
+
+zizmor runs with the caller's default `GITHUB_TOKEN`, which enables its online audits (`impostor-commit`, `known-vulnerable-actions`, `ref-confusion`, `stale-action-refs`). That token cannot see other private or internal repositories. If a workflow references one, for example an internal reusable workflow by branch, those audits cannot run and zizmor aborts with exit code 1 and no result.
+
+The workflow then re-runs zizmor with `--no-online-audits`, reports that result, and emits a warning naming the cause. Findings still fail the job, and so does any other error, including an error in the offline run. A broader token is deliberately not used. On a pull request from a branch in the same repository, that branch's own workflow files run with the token, so anyone who can push a branch could read it.
+
 ---
 
 ### knip
