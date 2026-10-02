@@ -300,9 +300,9 @@ phases:
 | `deploy_workflow` | No | `ci.yml` | Workflow waited on after pushing to env branch |
 | `image_override` | No | | Override CodeBuild image |
 | `compute_type_override` | No | | Override CodeBuild compute (e.g. `BUILD_GENERAL1_MEDIUM`) |
-| `stream_codebuild_logs` | No | `false` | Stream raw CodeBuild logs into the GitHub Actions log |
+| `stream_codebuild_logs` | No | `false` | Stream raw CodeBuild logs into the GitHub Actions log. Values the build fetches itself (e.g. from SSM) are **not masked** there; the run warns when this is on. |
 | `timeout_minutes` | No | `25` | Max minutes for the E2E job |
-| `passthrough_env` | No | | Extra **non-secret** env vars for the run, one `NAME=VALUE` per line. See below. |
+| `passthrough_env` | No | | Extra **non-secret** env vars for the run, one `NAME=VALUE` per line. Secret-like names are rejected. See below. |
 | `gh_environment` | No | | GitHub Environment to source per-env config from. The e2e job runs in it and forwards every `E2E_*` **variable** into the run. See below. |
 
 #### Secrets
@@ -366,9 +366,22 @@ with:
 Precedence when a name comes from more than one source (last wins): `passthrough_env`, then
 Environment `E2E_*` vars, then the reserved vars this workflow controls (`E2E_ENVIRONMENT`,
 `JFROG_ARTIFACTORY_*`). So the Environment overrides passthrough, and the reserved vars override
-both. **Never put secrets in `passthrough_env`**: `with:` inputs are not masked in logs. Secrets
-go through declared `secrets:` inputs, which is why the password is separate. Unset values
+both. **Never put secrets in `passthrough_env`**: `with:` inputs are not masked in logs, and the
+values are stored as plaintext in the CodeBuild build record. Secrets go through the workflow's
+dedicated secret inputs, or the buildspec reads them from SSM under `/tdp/e2e/`. Unset values
 interpolate to empty and are dropped; have the suite treat blank as unset.
+
+As a tripwire, a name that looks like a secret fails the run before CodeBuild starts. Names are
+split on `_`, compared case-insensitively, and one trailing `S` is dropped from each segment, so
+every rule below covers the plural too. A name is rejected when a segment is, or ends in, `TOKEN`,
+`PASSWORD`, `PASSWD`, `SECRET` or `APIKEY`, or is `KEY`, `ACCESSKEY`, `PRIVATEKEY`, `SECRETKEY`
+or `PASSPHRASE`. Two exceptions keep identifiers usable: a singular `KEY` right after `CYCLE`,
+`PROJECT`, `ISSUE`, `SUBDOMAIN`, `CACHE`, `OBJECT`, `PARTITION` or `SORT` (e.g.
+`ZEPHYR_CYCLE_KEY`; `PROJECT_KEYS` is still rejected), and a name whose last segment refers to a
+secret rather than holding one: `ID`, `ARN`, `NAME`, `PATH`, `FILE`, `URL`, `URI`, `ENDPOINT`,
+`HOST`, `HEADER`, `PARAM`, `PARAMETER`, `TTL` or `TYPE`, singular or plural (e.g. `API_KEY_ID`,
+`SECRET_ARNS`). So `E2E_API_TOKEN`, `DB_PASSWDS` and `PROJECT_KEYS` fail while `KEYCLOAK_URL`,
+`TOKENIZER_MODEL`, `MONKEYS` and `API_KEY_ID` pass. Rename a benign variable that trips it.
 
 > **Buildspec authors:** a buildspec that assigns these unconditionally will clobber
 > what the workflow passes. Prefer the inbound value:
