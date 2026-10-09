@@ -1,8 +1,8 @@
 name: Coverage Check
 description: >
   Post PR comment with trend comparison and enforce coverage rules
-  (no regression + new-code threshold). On main pushes, uploads
-  base coverage for future PR comparisons.
+  (no regression + new-code threshold on the lines a PR adds). On main
+  pushes, uploads base coverage for future PR comparisons.
 
 inputs:
   coverage-path:
@@ -15,13 +15,31 @@ inputs:
     description: "Number of days to retain the base coverage artifact"
     default: "90"
   new-code-threshold:
-    description: "Minimum statement coverage % for changed source files (0 to disable)"
+    description: >
+      Minimum statement coverage % for new code (0 to disable). In the default
+      changed-lines mode this is measured per changed source file, over only
+      the statements on lines the PR added; see new-code-mode.
     default: "85"
+  new-code-mode:
+    description: >
+      How new-code coverage is measured. "changed-lines" (default): statements
+      on the lines each PR file adds, ignoring deletions and pure reformatting;
+      a file whose added lines hold no statements passes. "whole-file": the
+      previous behaviour, every touched file's whole statement coverage.
+    default: "changed-lines"
+  allowed-coverage-drop:
+    description: >
+      Percentage points overall line coverage may fall below the base before
+      the regression check fails. The check also only fails when the PR leaves
+      more lines uncovered than the base, so a change that removes or
+      reformats covered lines (and adds no uncovered ones) is never a
+      regression. Set to 0 to fail on any drop that adds uncovered lines.
+    default: "0.1"
   source-file-pattern:
     description: "Grep regex for source files to enforce new-code threshold on"
     default: '^src/.*\.(ts|tsx)$'
   source-file-exclude:
-    description: "Grep regex for files to exclude from new-code threshold"
+    description: "Grep regex for files to exclude from new-code threshold (empty excludes nothing)"
     default: '\.(test|spec|stories)\.(ts|tsx)$'
 
 runs:
@@ -57,13 +75,48 @@ runs:
       shell: bash
       env:
         WORKFLOW_REF: ${{ github.workflow_ref }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       run: |
         # Extract filename from github.workflow_ref (e.g. owner/repo/.github/workflows/ci.yml@refs/heads/main)
         WORKFLOW=$(echo "$WORKFLOW_REF" | sed 's|.*\.github/workflows/||; s|@.*||')
         echo "workflow=$WORKFLOW" >> "$GITHUB_OUTPUT"
 
-    - name: Download base coverage from main
-      if: github.event_name == 'pull_request'
+        # The main commit this PR's coverage was actually measured on top of.
+        # actions/checkout's default for pull_request is the merge ref, whose
+        # first parent is that commit. `git cat-file` reads the parents from
+        # the commit object itself, so this works on the default depth-1
+        # clone, where `HEAD^1` does not resolve. A caller that checks out the
+        # PR head instead gets the event's base SHA.
+        BASE_SHA=""
+        PARENTS=$(git cat-file -p HEAD 2>/dev/null | sed -n 's/^parent //p' || true)
+        if [ "$(printf '%s\n' "$PARENTS" | grep -c .)" -eq 2 ]; then
+          BASE_SHA=$(printf '%s\n' "$PARENTS" | head -1)
+        else
+          BASE_SHA="$PR_BASE_SHA"
+        fi
+        echo "base-sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+
+    # Compare against coverage from the exact main commit this PR merges onto.
+    # Taking the latest main artifact instead means a PR can be judged against
+    # a main that has since moved — whose coverage then differs for reasons
+    # that have nothing to do with the PR.
+    - name: Download base coverage for the merge base
+      if: github.event_name == 'pull_request' && steps.resolve-workflow.outputs.base-sha != ''
+      uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
+      with:
+        name: ${{ inputs.base-coverage-artifact-name }}
+        commit: ${{ steps.resolve-workflow.outputs.base-sha }}
+        workflow: ${{ steps.resolve-workflow.outputs.workflow }}
+        path: base-coverage/
+        github_token: ${{ github.token }}
+      continue-on-error: true
+      id: base-download
+
+    # That commit's main run may still be in flight or may have failed. Fall
+    # back to the previous behaviour — the latest main artifact — and say so
+    # in the regression check, rather than silently skipping it.
+    - name: Download base coverage from latest main
+      if: github.event_name == 'pull_request' && steps.base-download.outcome != 'success'
       uses: dawidd6/action-download-artifact@bf251b5aa9c2f7eeb574a96ee720e24f801b7c11 # v6
       with:
         name: ${{ inputs.base-coverage-artifact-name }}
@@ -72,7 +125,7 @@ runs:
         path: base-coverage/
         github_token: ${{ github.token }}
       continue-on-error: true
-      id: base-download
+      id: base-download-latest
 
     - name: Delete previous coverage comment
       if: github.event_name == 'pull_request'
@@ -127,7 +180,7 @@ runs:
       with:
         json-summary-path: ${{ inputs.coverage-path }}coverage-summary.json
         json-final-path: ${{ inputs.coverage-path }}coverage-final.json
-        json-summary-compare-path: ${{ steps.base-download.outcome == 'success' && 'base-coverage/coverage-summary.json' || '' }}
+        json-summary-compare-path: ${{ (steps.base-download.outcome == 'success' || steps.base-download-latest.outcome == 'success') && 'base-coverage/coverage-summary.json' || '' }}
         threshold-icons: '{"0": "🔴", "1": "🟢"}'
 
     - name: Enforce coverage rules
@@ -136,11 +189,16 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         NEW_CODE_THRESHOLD: ${{ inputs.new-code-threshold }}
+        NEW_CODE_MODE: ${{ inputs.new-code-mode }}
+        ALLOWED_COVERAGE_DROP: ${{ inputs.allowed-coverage-drop }}
         SOURCE_FILE_PATTERN: ${{ inputs.source-file-pattern }}
         SOURCE_FILE_EXCLUDE: ${{ inputs.source-file-exclude }}
         COVERAGE_PATH: ${{ inputs.coverage-path }}
-        BASE_DOWNLOAD_OUTCOME: ${{ steps.base-download.outcome }}
+        BASE_FOUND: ${{ steps.base-download.outcome == 'success' || steps.base-download-latest.outcome == 'success' }}
+        BASE_FROM_LATEST: ${{ steps.base-download.outcome != 'success' && steps.base-download-latest.outcome == 'success' }}
+        BASE_SHA: ${{ steps.resolve-workflow.outputs.base-sha }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
         FAILED=0
@@ -150,31 +208,73 @@ runs:
           exit 1
         fi
 
-        # 1. Check overall coverage didn't decrease (only when base coverage exists)
-        if [ "$BASE_DOWNLOAD_OUTCOME" = "success" ] && [ -f base-coverage/coverage-summary.json ]; then
-          BASE_LINES=$(jq '.total.lines.pct' base-coverage/coverage-summary.json)
-          PR_LINES=$(jq '.total.lines.pct' "${COVERAGE_PATH}coverage-summary.json")
+        # 1. Overall coverage must not regress (only when base coverage exists).
+        #
+        # Compared on raw covered/total line counts, not the rounded `.pct`:
+        # line totals move with formatting alone. Reformatting PR #230 in
+        # ts-lib-ui-kit removed 2,398 executable lines, mostly covered ones, so
+        # the percentage fell 97.03% -> 96.98% while the PR left 60 FEWER lines
+        # uncovered than main. The old strict `pr < base` failed that. Now the
+        # check fails only when both hold:
+        #   - coverage fell by more than allowed-coverage-drop points, and
+        #   - the PR leaves more lines uncovered than the base.
+        if ! [[ "$ALLOWED_COVERAGE_DROP" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+          echo "::error::allowed-coverage-drop must be a non-negative number of percentage points, got '${ALLOWED_COVERAGE_DROP}'"
+          exit 1
+        fi
 
-          echo "Base coverage: ${BASE_LINES}%"
-          echo "PR coverage:   ${PR_LINES}%"
+        if [ "$BASE_FOUND" = "true" ] && [ -f base-coverage/coverage-summary.json ]; then
+          if [ "$BASE_FROM_LATEST" = "true" ]; then
+            echo "::notice::No base coverage artifact for main commit ${BASE_SHA:-<unknown>} (its run may be in progress or failed). Comparing against the latest main artifact, which may be from a different commit."
+          fi
 
-          if jq -en --argjson pr "$PR_LINES" --argjson base "$BASE_LINES" '$pr < $base' > /dev/null 2>&1; then
-            echo "::error::Overall line coverage decreased from ${BASE_LINES}% to ${PR_LINES}%"
+          # Falls back to the reported pct (and treats uncovered as unknown,
+          # i.e. "more") if a summary lacks the counts.
+          VERDICT=$(jq -nr \
+            --slurpfile base base-coverage/coverage-summary.json \
+            --slurpfile pr "${COVERAGE_PATH}coverage-summary.json" \
+            --argjson drop "$ALLOWED_COVERAGE_DROP" '
+            def lines($s): $s.total.lines
+              | if (.total | type) == "number" and (.covered | type) == "number"
+                then { pct: (if .total > 0 then .covered / .total * 100 else 100 end), uncovered: (.total - .covered) }
+                else { pct: .pct, uncovered: null }
+                end;
+            def r2: . * 100 | round / 100;
+            lines($base[0]) as $b
+            | lines($pr[0]) as $p
+            | ($b.pct - $p.pct) as $delta
+            | (if $b.uncovered == null or $p.uncovered == null then true else $p.uncovered > $b.uncovered end) as $more
+            | [ (if $delta > $drop and $more then "fail" else "pass" end),
+                ($b.pct | r2), ($p.pct | r2), ($delta | r2),
+                ($b.uncovered // "?"), ($p.uncovered // "?") ]
+            | @tsv')
+          IFS=$'\t' read -r RESULT BASE_PCT PR_PCT DELTA BASE_UNCOVERED PR_UNCOVERED <<< "$VERDICT"
+
+          echo "Base coverage: ${BASE_PCT}% (${BASE_UNCOVERED} lines uncovered)"
+          echo "PR coverage:   ${PR_PCT}% (${PR_UNCOVERED} lines uncovered)"
+
+          if [ "$RESULT" = "fail" ]; then
+            echo "::error::Overall line coverage decreased from ${BASE_PCT}% to ${PR_PCT}% (-${DELTA} points, allowed ${ALLOWED_COVERAGE_DROP}) and uncovered lines rose from ${BASE_UNCOVERED} to ${PR_UNCOVERED}"
             FAILED=1
           fi
         else
           echo "No base coverage found — skipping regression check"
         fi
 
-        # 2. Check changed source files meet new-code threshold (always runs on PRs)
+        # 2. New code must meet the threshold (always runs on PRs).
         THRESHOLD=$(echo "$NEW_CODE_THRESHOLD" | awk '{printf "%d", $1}')
         if [ "$THRESHOLD" -gt 0 ]; then
           if [ ! -f "${COVERAGE_PATH}coverage-final.json" ]; then
             echo "::error::${COVERAGE_PATH}coverage-final.json not found but new-code threshold is ${THRESHOLD}%"
             exit 1
           fi
+          if ! command -v node > /dev/null 2>&1; then
+            echo "::error::node is required for the new-code coverage check but is not on PATH"
+            exit 1
+          fi
 
-          # Fetch changed files via curl with pagination (avoids gh CLI dependency).
+          # Fetch the PR's changed files — with their patches — via curl with
+          # pagination (avoids gh CLI dependency).
           #
           # This list IS the enforcement gate: every changed source file is
           # checked against the threshold, so an empty list means "nothing to
@@ -184,11 +284,13 @@ runs:
           # fatal. Unlike the comment cleanup above, being noisy here is the
           # whole point: better a red job than a coverage rule that quietly
           # stopped enforcing.
-          CHANGED_FILES=""
+          WORK=$(mktemp -d)
           URL="https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100"
-          HEADERS=$(mktemp)
-          BODY=$(mktemp)
+          HEADERS="$WORK/headers"
+          PAGE_NO=0
           while [ -n "$URL" ]; do
+            PAGE_NO=$((PAGE_NO + 1))
+            BODY="$WORK/page-$(printf '%05d' "$PAGE_NO").json"
             STATUS=$(curl -sS -o "$BODY" -D "$HEADERS" -w '%{http_code}' \
               -H "Authorization: token ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
@@ -196,64 +298,60 @@ runs:
 
             if [ "$STATUS" != "200" ]; then
               echo "::error::Could not list changed files for PR #${PR_NUMBER} (HTTP ${STATUS}). Refusing to report a pass from an incomplete file list."
-              rm -f "$HEADERS" "$BODY"
+              rm -rf "$WORK"
               exit 1
             fi
 
-            if ! PAGE=$(jq -er '.[] | select(.status != "removed") | .filename' "$BODY" 2>/dev/null); then
-              # `-e` also makes an empty array non-zero; that is a legitimate
-              # empty page, not an error, so only a malformed body is fatal.
-              if ! jq -e 'type == "array"' "$BODY" > /dev/null 2>&1; then
-                echo "::error::Unexpected response listing changed files for PR #${PR_NUMBER}."
-                rm -f "$HEADERS" "$BODY"
-                exit 1
-              fi
-              PAGE=""
-            fi
-
-            if [ -n "$PAGE" ]; then
-              CHANGED_FILES+="$PAGE"$'\n'
+            if ! jq -e 'type == "array"' "$BODY" > /dev/null 2>&1; then
+              echo "::error::Unexpected response listing changed files for PR #${PR_NUMBER}."
+              rm -rf "$WORK"
+              exit 1
             fi
             URL=$(sed -n 's/.*<\([^>]*\)>; rel="next".*/\1/p' "$HEADERS")
           done
-          rm -f "$HEADERS" "$BODY"
 
-          echo "$CHANGED_FILES" \
-            | grep -E "$SOURCE_FILE_PATTERN" \
-            | grep -vE "$SOURCE_FILE_EXCLUDE" \
-            | grep -vE '/index\.(ts|tsx)$' \
-            | while IFS= read -r file; do
-              PCT=$(jq -r --arg f "$file" '
-                to_entries[]
-                | select(.key | endswith($f))
-                | .value.s
-                | to_entries
-                | if length == 0 then 100
-                  else ([.[].value] | (map(select(. > 0)) | length) / length * 100)
-                  end
-              ' "${COVERAGE_PATH}coverage-final.json" 2>/dev/null)
+          PR_FILES="$WORK/pr-files.json"
+          jq -s 'add // []' "$WORK"/page-*.json > "$PR_FILES"
 
-              if [ -z "$PCT" ] || [ "$PCT" = "null" ]; then
-                # File has no entry in coverage-final.json — it was excluded
-                # from instrumentation (e.g. CLI entry points tested via
-                # subprocess spawn). Skip rather than fail.
-                echo "Skipping $file — not in coverage scope"
-              else
-                FLOORED=$(echo "$PCT" | awk '{printf "%d", $1}')
-                if [ "$FLOORED" -lt "$THRESHOLD" ]; then
-                  echo "${file}|${FLOORED}" >> /tmp/coverage-check-failed
-                fi
-              fi
-            done || true
+          # The endpoint stops at 3000 files. Past that the list is incomplete,
+          # and an incomplete list is the silent-pass case above.
+          FILE_COUNT=$(jq 'length' "$PR_FILES")
+          if [ "$FILE_COUNT" -ge 3000 ]; then
+            echo "::error::PR #${PR_NUMBER} lists ${FILE_COUNT} files; the GitHub API returns at most 3000, so the new-code check cannot see every change."
+            rm -rf "$WORK"
+            exit 1
+          fi
 
-          if [ -f /tmp/coverage-check-failed ]; then
+          # An empty exclude pattern must exclude NOTHING. `grep -vE ""`
+          # matches every line, so source-file-exclude: '' — the obvious way to
+          # say "exclude nothing" — would otherwise filter out every file and
+          # disable this check.
+          if [ -n "$SOURCE_FILE_EXCLUDE" ]; then
+            EXCLUDE_FILTER=(grep -vE "$SOURCE_FILE_EXCLUDE")
+          else
+            EXCLUDE_FILTER=(cat)
+          fi
+
+          jq -r '.[] | select(.status != "removed") | .filename' "$PR_FILES" > "$WORK/changed.txt"
+          {
+            grep -E "$SOURCE_FILE_PATTERN" "$WORK/changed.txt" \
+              | "${EXCLUDE_FILTER[@]}" \
+              | grep -vE '/index\.(ts|tsx)$'
+          } > "$WORK/candidates.txt" || true
+
+          # Measures statements on added lines (or whole files, per
+          # new-code-mode); see changed-lines.mjs for the rules. Exit 1 is a
+          # file below threshold, 2 bad input — both fail the gate.
+          RC=0
+          COVERAGE_FINAL="${COVERAGE_PATH}coverage-final.json" \
+          PR_FILES_JSON="$PR_FILES" \
+          CANDIDATES_FILE="$WORK/candidates.txt" \
+          THRESHOLD="$THRESHOLD" \
+            node "${ACTION_PATH}/changed-lines.mjs" || RC=$?
+          rm -rf "$WORK"
+
+          if [ "$RC" -ne 0 ]; then
             FAILED=1
-            echo ""
-            echo "New/changed code coverage below threshold (required: ${THRESHOLD}%). Add tests to cover the new lines in these files:"
-            while IFS='|' read -r f p; do
-              echo "  -> ${f}: ${p}%"
-            done < /tmp/coverage-check-failed
-            rm -f /tmp/coverage-check-failed
           fi
         fi
 
