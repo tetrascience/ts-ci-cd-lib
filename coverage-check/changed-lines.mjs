@@ -65,40 +65,148 @@ export function parsePatch(patch) {
 }
 
 // What a formatter (Prettier) changes without changing behaviour: whitespace
-// and line breaks outside string literals, trailing commas, semicolons, quote
-// style, `{" "}` JSX spacers, parentheses around a single arrow parameter, and
-// the grouping parentheses it wraps a whole expression in: multi-line JSX
-// (`return (`, `=> (`, `&& (` ...) and a whole right-hand side, return value,
-// arrow body or ternary branch (`return (\n a * b\n)`, `=> (c ? a : b)`).
+// and line breaks between tokens, trailing commas, line-ending semicolons,
+// quote style, comments, `{" "}` JSX spacers, parentheses around a single
+// arrow parameter, and the grouping parentheses it wraps a whole expression
+// in: multi-line JSX (`return (`, `=> (`, `&& (` ...) and a whole right-hand
+// side, return value, arrow body or ternary branch.
 // Anything else is a real change and is held to the threshold.
 //
 // Kept deliberately narrow, because a false match waives coverage on a real
-// edit: only parens that wrap an ENTIRE operand are dropped (the closing paren
-// must end it), never after `&&`/`||`/`==` unless they wrap JSX, never around
-// an object literal (`=> ({})`) or a comma expression. So `!(a && b)` vs
-// `!a && b`, `(a + b) * c` vs `a + b * c` and `f(a)(b)` vs `f(a(b))` all count
-// as changed. A line break after `return`/`throw`/`yield`/`break`/`continue`
-// (where ASI ends the statement) and whitespace inside string literals are
-// kept too. A reflow this misses only means the reflowed statements are
-// measured, which errs toward failing, never toward a false pass.
-const STRING_LITERAL = /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`/g;
-const ASI_KEYWORD_BREAK = /\b(return|throw|yield|break|continue)[ \t]*(?:\/\/[^\n]*)?\n/g;
+// edit. The comparison is token-aware:
+//   - string, template and regex literal contents are compared verbatim;
+//   - whitespace that separates two tokens is kept (`a++ + b` vs `a + ++b`);
+//   - a `;` counts unless it ends a line AND the next line could not continue
+//     the statement (`(`, `[`, `` ` ``, `+`, `-`, `/`) AND it is not an empty
+//     statement body (`if (x);`, `else;`), and a line break after
+//     `return`/`throw`/`yield`/`break`/`continue` (ASI) counts too;
+//   - only parens that wrap an ENTIRE operand are dropped, never after
+//     `&&`/`||`/`==` unless they wrap JSX, never around an object literal or a
+//     comma expression, so `!(a && b)` vs `!a && b`, `(a + b) * c` vs
+//     `a + b * c` and `f(a)(b)` vs `f(a(b))` all count as changed.
+// A reflow this misses only means the reflowed statements are measured,
+// which errs toward failing, never toward a false pass.
+const ASI_KEYWORD_BREAK = /\b(return|throw|yield|break|continue)[ \t]*\n/g;
 const JSX_WRAP_PREFIX = /(?:return|=>|[=?:(,]|&&|\|\|)$/;
 const OPERAND_WRAP_PREFIX = /(?:\breturn|=>|(?<![=!<>])=|\?|:)$/;
 const OPERAND_END = new Set(["", "}", ")", "]", ",", ":", "\u0001"]);
+// A `/` after one of these starts a regex literal, not a division.
+const REGEX_PREFIX = /(?:^|[(,=:[!&|?{};+\-*%<>~^]|\b(?:return|typeof|case|in|of|void|delete|throw|new|yield|await))\s*$/;
+// A line starting with one of these continues the previous statement when it
+// has no `;` (ASI does not apply), so a `;` before it is significant.
+const ASI_HAZARD = /^\s*[([`+\-/]/;
+const WORD = /[\w$]/;
 
-function normalizeCode(code) {
-  return code
-    .replace(ASI_KEYWORD_BREAK, "$1\u0001")
-    .replace(/\s+/g, "")
-    .replace(/;/g, "")
+/**
+ * Splits source into code, literal (string, template, regex) and comment
+ * segments. Literal contents are compared verbatim; comments are dropped
+ * (they hold no statements). Single-line quotes only, so an apostrophe in JSX
+ * text never swallows the following lines.
+ */
+function segments(text) {
+  const out = [];
+  let code = "";
+  let i = 0;
+  const pushCode = () => {
+    if (code) out.push({ type: "code", text: code });
+    code = "";
+  };
+  while (i < text.length) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (ch === "/" && next === "/") {
+      while (i < text.length && text[i] !== "\n") i += 1;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end === -1 ? text.length : end + 2;
+      code += " ";
+      continue;
+    }
+    let end = -1;
+    if (ch === '"' || ch === "'" || ch === "`") {
+      for (let j = i + 1; j < text.length; j += 1) {
+        if (text[j] === "\\") j += 1;
+        else if (text[j] === ch) {
+          end = j;
+          break;
+        } else if (text[j] === "\n" && ch !== "`") break;
+      }
+    } else if (ch === "/" && REGEX_PREFIX.test(code)) {
+      let inClass = false;
+      for (let j = i + 1; j < text.length && text[j] !== "\n"; j += 1) {
+        if (text[j] === "\\") j += 1;
+        else if (text[j] === "[") inClass = true;
+        else if (text[j] === "]") inClass = false;
+        else if (text[j] === "/" && !inClass) {
+          end = j;
+          while (/[a-z]/i.test(text[end + 1] ?? "")) end += 1;
+          break;
+        }
+      }
+    }
+    if (end === -1) {
+      code += ch;
+      i += 1;
+      continue;
+    }
+    pushCode();
+    out.push({ type: "literal", text: text.slice(i, end + 1) });
+    i = end + 1;
+  }
+  pushCode();
+  return out;
+}
+
+/** Whether the `;` at `idx` ends a line in a way a formatter may add or drop. */
+function semicolonIsOptional(code, idx, following) {
+  const rest = code.slice(idx + 1);
+  const nl = rest.indexOf("\n");
+  // Not at the end of a line (`if (ready); run()`, a `for` header): keep.
+  if ((nl === -1 ? rest : rest.slice(0, nl)).trim() !== "") return false;
+  // The next line would continue this statement without the `;`.
+  const after = nl === -1 ? following : rest.slice(nl + 1) + following;
+  if (ASI_HAZARD.test(after.replace(/^\s*\n/g, ""))) return false;
+  // An empty statement body: `if (x);`, `while (x);`, `for (...);`, `else;`.
+  const before = code.slice(0, idx).trimEnd();
+  if (/\b(?:else|do)$/.test(before)) return false;
+  if (before.endsWith(")")) {
+    let depth = 0;
+    for (let j = before.length - 1; j >= 0; j -= 1) {
+      if (before[j] === ")") depth += 1;
+      else if (before[j] === "(" && --depth === 0) {
+        if (/\b(?:if|for|while)\s*$/.test(before.slice(0, j))) return false;
+        break;
+      }
+    }
+  }
+  return true;
+}
+
+function normalizeCode(code, following) {
+  let text = code.replace(ASI_KEYWORD_BREAK, "$1\u0001");
+  let kept = "";
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === ";" && semicolonIsOptional(text, i, following)) continue;
+    kept += text[i];
+  }
+  // Whitespace goes, except where removing it would merge two tokens:
+  // `a b` -> `ab`, `a++ + b` -> `a+++b` (= `a + ++b`).
+  text = kept.replace(/\s+/g, (ws, at, all) => {
+    const left = all[at - 1] ?? "";
+    const right = all[at + ws.length] ?? "";
+    const merges = (WORD.test(left) && WORD.test(right)) || ("+-".includes(left) && left && left === right);
+    return merges ? " " : "";
+  });
+  return text
     .replace(/,(?=[)\]}>]|$)/g, "")
     .replace(/(^|[^\w$.\])])\(([A-Za-z_$][\w$]*)\)=>/g, "$1$2=>");
 }
 
-function normalizeString(literal) {
+function normalizeLiteral(literal) {
   const quote = literal[0];
-  if (quote === "`") return literal;
+  if (quote !== '"' && quote !== "'") return literal;
   const body = literal.slice(1, -1).replace(/\\(["'])/g, "$1");
   return `"${body}"`;
 }
@@ -138,21 +246,38 @@ function dropWrappers(text) {
       !inner.startsWith("{") &&
       !hasTopLevelComma(inner);
     if (!isJsx && !isOperand) continue;
-    out = out.slice(0, i) + inner + out.slice(close + 1);
+    const left = out[i - 1] ?? "";
+    const right = out[close + 1] ?? "";
+    const pre = WORD.test(left) && WORD.test(inner[0]) ? " " : "";
+    const post = WORD.test(right) && WORD.test(inner[inner.length - 1]) ? " " : "";
+    out = out.slice(0, i) + pre + inner + post + out.slice(close + 1);
     i -= 1;
   }
   return out;
 }
 
-export function normalizeForFormatting(lines) {
-  const text = lines.join("\n");
+/**
+ * Canonical form of `lines` for comparing a removed block with its added
+ * replacement. `nextLine` is the unchanged line that follows the block, if
+ * any: whether a trailing `;` matters depends on how that line starts.
+ */
+export function normalizeForFormatting(lines, nextLine = "") {
+  const parts = segments(lines.join("\n"));
   let out = "";
-  let last = 0;
-  for (const match of text.matchAll(STRING_LITERAL)) {
-    out += normalizeCode(text.slice(last, match.index)) + "\u0002" + normalizeString(match[0]) + "\u0002";
-    last = match.index + match[0].length;
-  }
-  out += normalizeCode(text.slice(last));
+  parts.forEach((part, idx) => {
+    if (part.type === "literal") {
+      out += "\u0002" + normalizeLiteral(part.text) + "\u0002";
+      return;
+    }
+    const following =
+      parts
+        .slice(idx + 1)
+        .map((p) => p.text)
+        .join("") +
+      "\n" +
+      nextLine;
+    out += normalizeCode(part.text, following);
+  });
   return dropWrappers(out.replace(/\{\u0002" "\u0002\}/g, ""));
 }
 
@@ -175,11 +300,15 @@ export function addedLines(patch, fileLines = null) {
 
     let newLine = hunk.newStart + offset;
     let block = { removed: [], added: [] };
-    const flush = () => {
+    const flush = (nextLine = "") => {
       if (block.added.length > 0) {
         const formatting =
           hunkIsFormatting ||
-          normalizeForFormatting(block.removed) === normalizeForFormatting(block.added.map((a) => a.text));
+          normalizeForFormatting(block.removed, nextLine) ===
+            normalizeForFormatting(
+              block.added.map((a) => a.text),
+              nextLine,
+            );
         for (const a of block.added) {
           if (formatting) formattingOnly += 1;
           else lines.add(a.line);
@@ -189,7 +318,7 @@ export function addedLines(patch, fileLines = null) {
     };
     for (const l of hunk.lines) {
       if (l.op === " ") {
-        flush();
+        flush(l.text);
         newLine += 1;
       } else if (l.op === "-") {
         block.removed.push(l.text);
@@ -268,21 +397,21 @@ export function statementCoverage(entry, lineSet = null) {
     hits: entry.s?.[id] ?? 0,
   }));
   // Whole-file mode: every statement, reported by its start line.
-  // Changed-lines mode: for each changed line, only the INNERMOST statement
+  // Changed-lines mode: for each changed line, only the INNERMOST statements
   // containing it. Counting every enclosing statement (`export const C = () =>
   // {…}`, `return (…)`) would let covered wrappers dilute a new, untested
   // statement past the threshold.
   const chosen = new Map();
   if (lineSet) {
     for (const line of lineSet) {
-      let best = null;
-      for (const st of stmts) {
-        if (line < st.start.line || line > st.end.line) continue;
-        if (!best || isInside(st, best)) best = st;
+      // Every statement on the line that encloses no other one on it, so
+      // siblings (`covered(); uncovered();`) are all measured.
+      const onLine = stmts.filter((st) => line >= st.start.line && line <= st.end.line);
+      const innermost = onLine.filter((st) => !onLine.some((o) => o !== st && isInside(o, st) && !isInside(st, o)));
+      for (const st of innermost) {
+        if (!chosen.has(st.id)) chosen.set(st.id, { st, lines: [] });
+        chosen.get(st.id).lines.push(line);
       }
-      if (!best) continue;
-      if (!chosen.has(best.id)) chosen.set(best.id, { st: best, lines: [] });
-      chosen.get(best.id).lines.push(line);
     }
   } else {
     for (const st of stmts) chosen.set(st.id, { st, lines: [st.start.line] });
@@ -435,7 +564,14 @@ function main() {
     console.log("::error::PR file list is not a JSON array.");
     process.exit(2);
   }
-  const candidates = readFileSync(env.CANDIDATES_FILE, "utf8")
+  let candidatesText;
+  try {
+    candidatesText = readFileSync(env.CANDIDATES_FILE, "utf8");
+  } catch (err) {
+    console.log(`::error::Could not read candidates file (${env.CANDIDATES_FILE}): ${err.message}`);
+    process.exit(2);
+  }
+  const candidates = candidatesText
     .split("\n")
     .map((s) => s.trim())
     .filter(Boolean);

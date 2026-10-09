@@ -322,6 +322,22 @@ runs:
             exit 1
           fi
 
+          # A caller regex grep cannot parse makes grep exit 2 before matching
+          # anything, which would leave no candidates and pass silently.
+          # `printf '' | grep -E <pat>` exits 1 for no match, 2 only for a bad
+          # pattern.
+          for PATTERN_INPUT in source-file-pattern source-file-exclude; do
+            if [ "$PATTERN_INPUT" = source-file-pattern ]; then PATTERN="$SOURCE_FILE_PATTERN"; else PATTERN="$SOURCE_FILE_EXCLUDE"; fi
+            [ -n "$PATTERN" ] || continue
+            GREP_RC=0
+            printf '' | grep -E "$PATTERN" > /dev/null 2>&1 || GREP_RC=$?
+            if [ "$GREP_RC" -eq 2 ]; then
+              echo "::error::${PATTERN_INPUT} is not a valid grep -E regex: '${PATTERN}'"
+              rm -rf "$WORK"
+              exit 1
+            fi
+          done
+
           # An empty exclude pattern must exclude NOTHING. `grep -vE ""`
           # matches every line, so source-file-exclude: '' — the obvious way to
           # say "exclude nothing" — would otherwise filter out every file and
