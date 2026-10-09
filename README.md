@@ -477,7 +477,7 @@ steps:
 | `base-retention-days` | Retention for the base coverage artifact | No | `"90"` |
 | `new-code-threshold` | Minimum statement coverage % for new code, per file (`0` disables) | No | `"85"` |
 | `new-code-mode` | `changed-lines`: measure only statements on lines the PR adds. `whole-file`: measure every touched file's whole coverage (the behaviour before SW-2733) | No | `"changed-lines"` |
-| `allowed-coverage-drop` | Percentage points overall line coverage may fall before the regression rule fails | No | `"0.1"` |
+| `allowed-coverage-drop` | Percentage points overall line coverage may fall before the regression rule fails | No | `"0"` |
 | `source-file-pattern` | Grep regex selecting files the new-code rule applies to | No | `'^src/.*\.(ts\|tsx)$'` |
 | `source-file-exclude` | Grep regex excluding files from the new-code rule (empty excludes nothing). `index.ts`/`index.tsx` are always excluded | No | `'\.(test\|spec\|stories)\.(ts\|tsx)$'` |
 
@@ -492,8 +492,9 @@ The base is the coverage artifact from the exact `main` commit the PR was measur
 In the default `changed-lines` mode, each changed source file is measured on the statements that sit on lines the PR **added**, taken from the `patch` in the pull request files API:
 
 - Files with no added lines (deletions only, pure renames, mode changes) are skipped.
-- Change blocks that only reformat code (whitespace, line breaks, trailing commas, semicolons, quote style, grouping parentheses) do not count as added lines, so a Prettier run over legacy code passes.
+- Change blocks that only reformat code (whitespace and line breaks outside strings, trailing commas, semicolons, quote style, `{" "}` JSX spacers, parentheses around a single arrow parameter, and parentheses wrapping a whole JSX block, return value, arrow body, right-hand side or ternary branch) do not count as added lines, so a Prettier run over legacy code passes. Other parentheses are compared as written, so `!(a && b)` vs `!a && b` counts as a change.
 - Added lines that hold no statements (imports, types, comments, braces) are skipped.
+- Each added line is attributed to the innermost statement containing it, so covered enclosing statements (a component, a `return (…)`) cannot dilute a new, untested one.
 - Otherwise covered/changed statements, floored, must reach `new-code-threshold`. A failure lists each file as `covered/changed statements` with the uncovered line numbers, and annotates the first one.
 - When GitHub omits a file's `patch` (diffs that are too large), or the patch cannot be lined up with the checked-out file, that file falls back to whole-file coverage and the run logs a warning naming it.
 - Hunks are re-anchored against the checked-out file, so line numbers stay correct when CI measures the merge commit and `main` has moved since the branch point.

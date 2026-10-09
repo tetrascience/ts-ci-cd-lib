@@ -33,8 +33,8 @@ inputs:
       the regression check fails. The check also only fails when the PR leaves
       more lines uncovered than the base, so a change that removes or
       reformats covered lines (and adds no uncovered ones) is never a
-      regression. Set to 0 to fail on any drop that adds uncovered lines.
-    default: "0.1"
+      regression. Defaults to 0: any drop that adds uncovered lines fails.
+    default: "0"
   source-file-pattern:
     description: "Grep regex for source files to enforce new-code threshold on"
     default: '^src/.*\.(ts|tsx)$'

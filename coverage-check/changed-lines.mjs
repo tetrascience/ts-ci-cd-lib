@@ -65,29 +65,95 @@ export function parsePatch(patch) {
 }
 
 // What a formatter (Prettier) changes without changing behaviour: whitespace
-// and line breaks, trailing commas, semicolons, quote style, `{" "}` JSX
-// spacers, and the grouping parentheses it adds or drops for readability
-// (around multi-line JSX, arrow bodies, ternary branches, mixed `??`/`||`,
-// single arrow parameters). Anything else is a real change.
+// and line breaks outside string literals, trailing commas, semicolons, quote
+// style, `{" "}` JSX spacers, parentheses around a single arrow parameter, and
+// the grouping parentheses it wraps a whole expression in: multi-line JSX
+// (`return (`, `=> (`, `&& (` ...) and a whole right-hand side, return value,
+// arrow body or ternary branch (`return (\n a * b\n)`, `=> (c ? a : b)`).
+// Anything else is a real change and is held to the threshold.
 //
-// Grouping parens are dropped wholesale rather than matched one by one: a
-// formatter adds them asymmetrically (`return (\n(a + 1) * b\n)` becomes
-// `return (a + 1) * b`), so any pairing rule mispairs. Empty `()` is kept,
-// because `handler` vs `handler()` is a real change. The cost is that a pure
-// precedence edit inside an otherwise-reformatted block — `(a + b) * c` to
-// `a + b * c` — reads as formatting. That trade is deliberate: a false match
-// waives one statement's coverage requirement and never changes behaviour,
-// while a miss fails a format-only PR.
-export function normalizeForFormatting(lines) {
-  return lines
-    .join("\n")
+// Kept deliberately narrow, because a false match waives coverage on a real
+// edit: only parens that wrap an ENTIRE operand are dropped (the closing paren
+// must end it), never after `&&`/`||`/`==` unless they wrap JSX, never around
+// an object literal (`=> ({})`) or a comma expression. So `!(a && b)` vs
+// `!a && b`, `(a + b) * c` vs `a + b * c` and `f(a)(b)` vs `f(a(b))` all count
+// as changed. A line break after `return`/`throw`/`yield`/`break`/`continue`
+// (where ASI ends the statement) and whitespace inside string literals are
+// kept too. A reflow this misses only means the reflowed statements are
+// measured, which errs toward failing, never toward a false pass.
+const STRING_LITERAL = /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`/g;
+const ASI_KEYWORD_BREAK = /\b(return|throw|yield|break|continue)[ \t]*(?:\/\/[^\n]*)?\n/g;
+const JSX_WRAP_PREFIX = /(?:return|=>|[=?:(,]|&&|\|\|)$/;
+const OPERAND_WRAP_PREFIX = /(?:\breturn|=>|(?<![=!<>])=|\?|:)$/;
+const OPERAND_END = new Set(["", "}", ")", "]", ",", ":", "\u0001"]);
+
+function normalizeCode(code) {
+  return code
+    .replace(ASI_KEYWORD_BREAK, "$1\u0001")
     .replace(/\s+/g, "")
-    .replace(/'/g, '"')
     .replace(/;/g, "")
-    .replace(/\{""\}/g, "")
     .replace(/,(?=[)\]}>]|$)/g, "")
-    .replace(/\(\)/g, "\u0000")
-    .replace(/[()]/g, "");
+    .replace(/(^|[^\w$.\])])\(([A-Za-z_$][\w$]*)\)=>/g, "$1$2=>");
+}
+
+function normalizeString(literal) {
+  const quote = literal[0];
+  if (quote === "`") return literal;
+  const body = literal.slice(1, -1).replace(/\\(["'])/g, "$1");
+  return `"${body}"`;
+}
+
+function matchingParen(text, open) {
+  let depth = 0;
+  for (let j = open; j < text.length; j += 1) {
+    if (text[j] === "(") depth += 1;
+    else if (text[j] === ")" && --depth === 0) return j;
+  }
+  return -1;
+}
+
+function hasTopLevelComma(inner) {
+  let depth = 0;
+  for (const ch of inner) {
+    if ("([{".includes(ch)) depth += 1;
+    else if (")]}".includes(ch)) depth -= 1;
+    else if (ch === "," && depth === 0) return true;
+  }
+  return false;
+}
+
+/** Drops grouping parens a formatter adds around a whole operand (see above). */
+function dropWrappers(text) {
+  let out = text;
+  for (let i = out.indexOf("("); i !== -1; i = out.indexOf("(", i + 1)) {
+    const close = matchingParen(out, i);
+    if (close === -1) continue;
+    const prefix = out.slice(0, i);
+    const inner = out.slice(i + 1, close);
+    const isJsx = inner.startsWith("<") && JSX_WRAP_PREFIX.test(prefix);
+    const isOperand =
+      OPERAND_WRAP_PREFIX.test(prefix) &&
+      OPERAND_END.has(out[close + 1] ?? "") &&
+      inner !== "" &&
+      !inner.startsWith("{") &&
+      !hasTopLevelComma(inner);
+    if (!isJsx && !isOperand) continue;
+    out = out.slice(0, i) + inner + out.slice(close + 1);
+    i -= 1;
+  }
+  return out;
+}
+
+export function normalizeForFormatting(lines) {
+  const text = lines.join("\n");
+  let out = "";
+  let last = 0;
+  for (const match of text.matchAll(STRING_LITERAL)) {
+    out += normalizeCode(text.slice(last, match.index)) + "\u0002" + normalizeString(match[0]) + "\u0002";
+    last = match.index + match[0].length;
+  }
+  out += normalizeCode(text.slice(last));
+  return dropWrappers(out.replace(/\{\u0002" "\u0002\}/g, ""));
 }
 
 /**
@@ -195,24 +261,45 @@ export function findCoverageEntry(coverage, filename, workspace) {
  * lines count. Returns { total, covered, uncoveredLines }.
  */
 export function statementCoverage(entry, lineSet = null) {
-  let total = 0;
+  const stmts = Object.entries(entry.statementMap ?? {}).map(([id, loc]) => ({
+    id,
+    start: loc.start,
+    end: loc.end ?? loc.start,
+    hits: entry.s?.[id] ?? 0,
+  }));
+  // Whole-file mode: every statement, reported by its start line.
+  // Changed-lines mode: for each changed line, only the INNERMOST statement
+  // containing it. Counting every enclosing statement (`export const C = () =>
+  // {…}`, `return (…)`) would let covered wrappers dilute a new, untested
+  // statement past the threshold.
+  const chosen = new Map();
+  if (lineSet) {
+    for (const line of lineSet) {
+      let best = null;
+      for (const st of stmts) {
+        if (line < st.start.line || line > st.end.line) continue;
+        if (!best || isInside(st, best)) best = st;
+      }
+      if (!best) continue;
+      if (!chosen.has(best.id)) chosen.set(best.id, { st: best, lines: [] });
+      chosen.get(best.id).lines.push(line);
+    }
+  } else {
+    for (const st of stmts) chosen.set(st.id, { st, lines: [st.start.line] });
+  }
   let covered = 0;
   const uncovered = new Set();
-  for (const [id, loc] of Object.entries(entry.statementMap ?? {})) {
-    const startLine = loc.start.line;
-    const endLine = loc.end?.line ?? startLine;
-    let hit = [];
-    if (lineSet) {
-      for (const line of lineSet) if (line >= startLine && line <= endLine) hit.push(line);
-      if (hit.length === 0) continue;
-    } else {
-      hit = [startLine];
-    }
-    total += 1;
-    if ((entry.s?.[id] ?? 0) > 0) covered += 1;
-    else for (const line of hit) uncovered.add(line);
+  for (const { st, lines } of chosen.values()) {
+    if (st.hits > 0) covered += 1;
+    else for (const line of lines) uncovered.add(line);
   }
-  return { total, covered, uncoveredLines: [...uncovered].sort((a, b) => a - b) };
+  return { total: chosen.size, covered, uncoveredLines: [...uncovered].sort((a, b) => a - b) };
+}
+
+/** True when statement `a` sits within (or equals the span of) statement `b`. */
+function isInside(a, b) {
+  const pos = (p) => p.line * 1e6 + (p.column ?? 0);
+  return pos(a.start) >= pos(b.start) && pos(a.end) <= pos(b.end);
 }
 
 /** [3,4,5,9] -> "3-5, 9" */
