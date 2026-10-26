@@ -146,6 +146,7 @@ jobs:
 | `node_version` | Node.js version | No | `"20"` |
 | `working_directory` | Directory containing the package to publish | No | `"."` |
 | `prerelease_tag` | Prerelease tag for version suffix and npm dist-tag (e.g., alpha, beta). Leave empty for non-prerelease versions. | No | `""` |
+| `prerelease_version` | Exact prerelease version to publish (e.g., `1.2.0-beta.3`), instead of `<package.json version>-<prerelease_tag>.<run_number>.<run_attempt>`. Use it to number prereleases yourself, for example per release line. Requires `prerelease_tag`, and must be `X.Y.Z-<prerelease_tag>.<identifiers>`. The version is published as given, so a re-run of a successful publish fails (npm rejects a version that already exists). | No | `""` |
 | `run_tests` | Whether to run tests before publishing | No | `true` |
 | `publish_to_public_npm` | Set to true to confirm publishing to public npm registry | No | `false` |
 | `pre_install_command` | Shell command to run after checkout and before registry auth + install. Runs at repo root (not `working_directory`). Use for codegen that produces the `working_directory` contents, and keep the value static in the caller workflow. | No | `""` |

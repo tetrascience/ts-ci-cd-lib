@@ -18,6 +18,11 @@ on:
         type: string
         default: ""
         required: false
+      prerelease_version:
+        description: "Exact version to publish as a prerelease (e.g., 1.2.0-beta.3), instead of the default <package.json version>-<prerelease_tag>.<run_number>.<run_attempt>. Requires prerelease_tag, and must be X.Y.Z-<prerelease_tag>.<identifiers>."
+        type: string
+        default: ""
+        required: false
       run_tests:
         required: false
         description: Whether to run tests before publishing
@@ -161,18 +166,35 @@ jobs:
           fi
           echo "Git tag matches package.json version: $PACKAGE_VERSION"
 
-      # Prerelease: Update version with prerelease suffix
+      # Prerelease: Update version with prerelease suffix, or to the caller's
+      # exact prerelease_version.
       - name: Update version for prerelease
-        if: inputs.prerelease_tag != ''
+        if: inputs.prerelease_tag != '' || inputs.prerelease_version != ''
         env:
           # Route inputs through env vars — direct ${{ }} in `run:` is a
           # template-injection vector (attacker-controllable input executed as shell).
           PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+          PRERELEASE_VERSION: ${{ inputs.prerelease_version }}
           RUN_NUMBER: ${{ github.run_number }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          CURRENT_VERSION=$(node -p "require('./package.json').version")
-          NEW_VERSION="${CURRENT_VERSION}-${PRERELEASE_TAG}.${RUN_NUMBER}.${RUN_ATTEMPT}"
+          if [[ -n "$PRERELEASE_VERSION" ]]; then
+            # The npm dist-tag comes from prerelease_tag, so a version under a
+            # different tag (or no tag at all) would publish mislabelled.
+            if [[ -z "$PRERELEASE_TAG" ]]; then
+              echo "ERROR: prerelease_version requires prerelease_tag (the npm dist-tag to publish under)"
+              exit 1
+            fi
+            if [[ ! "$PRERELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$ ]] ||
+              [[ "${PRERELEASE_VERSION#*-}" != "${PRERELEASE_TAG}."* ]]; then
+              echo "ERROR: prerelease_version must be X.Y.Z-${PRERELEASE_TAG}.<identifiers>, got '$PRERELEASE_VERSION'"
+              exit 1
+            fi
+            NEW_VERSION="$PRERELEASE_VERSION"
+          else
+            CURRENT_VERSION=$(node -p "require('./package.json').version")
+            NEW_VERSION="${CURRENT_VERSION}-${PRERELEASE_TAG}.${RUN_NUMBER}.${RUN_ATTEMPT}"
+          fi
           jq --arg v "$NEW_VERSION" '.version = $v' package.json > package.json.tmp && mv package.json.tmp package.json
           echo "Publishing version: $NEW_VERSION"
 
