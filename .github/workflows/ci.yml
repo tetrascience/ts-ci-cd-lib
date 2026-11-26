@@ -13,3 +13,19 @@ jobs:
   ghactionlint:
     name: GitHub Actions lint
     uses: ./.github/workflows/ghactionlint.yml
+
+  # Runs the Start/Wait CodeBuild step scripts of e2e-codebuild.yml against a
+  # stub aws, so the secret handling is checked without an AWS account.
+  e2e-codebuild-tests:
+    name: e2e-codebuild step tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Run the step tests
+        run: bash tests/e2e-codebuild/run.sh

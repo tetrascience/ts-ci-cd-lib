@@ -89,6 +89,15 @@ on:
         type: string
         default: ""
         required: false
+      allow_plaintext_fallback:
+        description: |
+          What to do when the e2e role may not write a credential to SSM because
+          it lacks ssm:PutParameter on parameter/tdp/e2e/ci/*. true: send that
+          credential as a PLAINTEXT override, stored in the CodeBuild build
+          record, and warn. false: fail the run before the build starts.
+        type: boolean
+        default: true
+        required: false
     secrets:
       JFROG_ARTIFACTORY_NPM_VIRTUAL_URL:
         required: true
@@ -431,6 +440,7 @@ jobs:
           TARGET_ACCOUNT: ${{ steps.env.outputs.account }}
           TARGET_REGION: ${{ steps.env.outputs.region }}
           TARGET_CF_ENV: ${{ steps.env.outputs.cf_env }}
+          ALLOW_PLAINTEXT_FALLBACK: ${{ inputs.allow_plaintext_fallback }}
           PASSTHROUGH_ENV: ${{ inputs.passthrough_env }}
           # E2E_* config visible to the job (org, repo, and the selected
           # Environment, the Environment winning) as JSON; the script forwards it
@@ -528,12 +538,16 @@ jobs:
               | {name: .key, value: .value} ]')
 
           # Reserved vars this workflow controls. Appended after passthrough and
-          # the Environment vars so neither can shadow them.
+          # the Environment vars so neither can shadow them; the credential names
+          # are dropped from those sources outright. JFROG_ARTIFACTORY_AUTH is
+          # always sent, empty unless the secret below replaces it, as before.
           ENV_VARS=$(jq -nc --argjson base "$ENV_VARS" \
             --arg env "$TARGET_ENV" --arg url "$JFROG_URL" \
-            '$base + [
+            '["JFROG_ARTIFACTORY_AUTH","ZEPHYR_API_TOKEN","E2E_USER_PASSWORD"] as $credentials
+            | [ $base[] | select(.name as $n | $credentials | index($n) | not) ] + [
               {"name":"E2E_ENVIRONMENT","value":$env},
-              {"name":"JFROG_ARTIFACTORY_URL","value":$url}
+              {"name":"JFROG_ARTIFACTORY_URL","value":$url},
+              {"name":"JFROG_ARTIFACTORY_AUTH","value":""}
             ]')
 
           # Secrets. Each non-empty one is written to an SSM SecureString scoped to
@@ -544,9 +558,16 @@ jobs:
           SECRET_TMP=$(mktemp -d "${RUNNER_TEMP:-/tmp}/e2e-secrets.XXXXXX")
           trap 'rm -rf "$SECRET_TMP"' EXIT
           PLAINTEXT_FALLBACKS='[]'
+          # Text for a workflow command: the value masked, `%` escaped, one line.
+          sanitize() {
+            local text="${1//"$2"/***}"
+            text="${text//%/%25}"
+            text="${text//$'\r'/ }"
+            printf '%s' "${text//$'\n'/ }"
+          }
           add_secret() {
             local name="$1" from="$2" leaf="$3"
-            local value="${!from:-}" repo parameter err code rc=0
+            local value="${!from:-}" repo parameter bytes err msg code attempt rc
             [[ -n "$value" ]] || return 0
 
             # GitHub only allows these characters in a repository name, and they
@@ -560,35 +581,62 @@ jobs:
 
             # The value goes through a 0600 file (umask above; printf is a builtin), never argv.
             printf '%s' "$value" > "$SECRET_TMP/value"
-            err=$(AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=5 aws ssm put-parameter \
-              --name "$parameter" --type SecureString --overwrite \
-              --value "file://$SECRET_TMP/value" 2>&1 >/dev/null) || rc=$?
+
+            # A Standard-tier parameter holds 4 KB. Fail here with the reason: the
+            # Advanced tier is billed per parameter and cannot be downgraded again.
+            bytes=$(( $(wc -c < "$SECRET_TMP/value") ))
+            if (( bytes > 4096 )); then
+              echo "::error::$name is $bytes bytes, more than the 4096 an SSM Standard-tier parameter can hold, so it cannot be passed to CodeBuild by reference. Use a shorter credential."
+              exit 1
+            fi
+
+            # Parallel runs of one repo write the same parameter, so SSM can answer
+            # TooManyUpdates or throttle. Retry those a few times, then fail closed.
+            for attempt in 1 2 3 4 5; do
+              rc=0 code=""
+              err=$(aws ssm put-parameter --name "$parameter" --type SecureString --overwrite \
+                --value "file://$SECRET_TMP/value" 2>&1 >/dev/null) || rc=$?
+              (( rc == 0 )) && break
+              if [[ "$err" =~ An\ error\ occurred\ \(([A-Za-z0-9._]+)\)\ when\ calling\ the\ PutParameter\ operation ]]; then
+                code="${BASH_REMATCH[1]}"
+              fi
+              case "$code" in
+                TooManyUpdates|ThrottlingException|Throttling|RequestLimitExceeded|TooManyRequestsException) ;;
+                *) break ;;
+              esac
+              if (( attempt < 5 )); then
+                echo "$name: SSM answered $code on attempt $attempt of 5; retrying."
+                sleep $(( attempt * 2 + RANDOM % 4 ))
+              fi
+            done
             if (( rc == 0 )); then
               echo "$name: stored in SSM $parameter; CodeBuild resolves it at build start."
               ENV_VARS=$(jq -nc --arg n "$name" --arg p "$parameter" --argjson base "$ENV_VARS" \
                 '$base + [{"name":$n,"value":$p,"type":"PARAMETER_STORE"}]')
               return 0
             fi
+            msg=$(sanitize "$err" "$value")
 
-            code=""
-            if [[ "$err" =~ An\ error\ occurred\ \(([A-Za-z0-9._]+)\)\ when\ calling\ the\ PutParameter\ operation ]]; then
-              code="${BASH_REMATCH[1]}"
-            fi
-            # Only a missing permission falls back: the role gets ssm:PutParameter
-            # from the tdp-e2e stack, which may not be deployed in this account yet.
-            # The value is added at the very end, so it stays out of jq's argv too.
-            if [[ "$code" == "AccessDeniedException" || "$code" == "AccessDenied" ]]; then
-              echo "::warning::$name is sent to CodeBuild as PLAINTEXT, so its value is stored in the CodeBuild build record: role gha-tdp-e2e-${TARGET_CF_ENV} in account ${TARGET_ACCOUNT} (${TARGET_REGION}) is not allowed ssm:PutParameter on parameter/tdp/e2e/ci/*. Deploy the tdp-e2e stack update that grants it to send a reference instead."
+            # Only the role's own missing ssm:PutParameter allow may fall back: the
+            # tdp-e2e stack grants it and may not be deployed in this account yet. A
+            # KMS denial, an explicit deny, an SCP or a boundary is a real failure.
+            if [[ "$code" == "AccessDeniedException" || "$code" == "AccessDenied" ]] &&
+              [[ "$err" == *"is not authorized to perform: ssm:PutParameter"* && "$err" != *"explicit deny"* ]] &&
+              [[ "$err" != *"because no "* || "$err" == *"because no identity-based policy allows"* ]]; then
+              if [[ "$ALLOW_PLAINTEXT_FALLBACK" != "true" ]]; then
+                echo "::error::Could not store $name in SSM parameter $parameter: role gha-tdp-e2e-${TARGET_CF_ENV} in account ${TARGET_ACCOUNT} (${TARGET_REGION}) is not allowed ssm:PutParameter on parameter/tdp/e2e/ci/*, and allow_plaintext_fallback is false. AWS said: $msg"
+                exit 1
+              fi
+              echo "::warning::$name is sent to CodeBuild as PLAINTEXT, so its value is stored in the CodeBuild build record: role gha-tdp-e2e-${TARGET_CF_ENV} in account ${TARGET_ACCOUNT} (${TARGET_REGION}) is not allowed ssm:PutParameter on parameter/tdp/e2e/ci/*. Deploy the tdp-e2e stack update that grants it to send a reference instead. AWS said: $msg"
+              echo "- **PLAINTEXT fallback:** \`$name\` was sent to CodeBuild as a plaintext override, stored in the build record, because role \`gha-tdp-e2e-${TARGET_CF_ENV}\` lacks \`ssm:PutParameter\` on \`parameter/tdp/e2e/ci/*\`." >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+              # The value is added at the very end, so it stays out of jq's argv too.
               PLAINTEXT_FALLBACKS=$(jq -nc --arg n "$name" --arg f "$from" --argjson base "$PLAINTEXT_FALLBACKS" \
                 '$base + [{"name":$n,"from":$f}]')
               return 0
             fi
 
-            # Anything else (throttling, validation, network) fails before start-build.
-            err="${err//"$value"/***}"
-            err="${err//%/%25}"
-            err="${err//$'\r'/ }"
-            echo "::error::Could not store $name in SSM parameter $parameter (${code:-no AWS error code}): ${err//$'\n'/ }"
+            # Anything else fails before start-build.
+            echo "::error::Could not store $name in SSM parameter $parameter (${code:-no AWS error code}). AWS said: $msg"
             exit 1
           }
           add_secret JFROG_ARTIFACTORY_AUTH JFROG_AUTH jfrog-npm-read-auth
@@ -617,7 +665,7 @@ jobs:
           jq -c --argjson fallbacks "$PLAINTEXT_FALLBACKS" '
             . + [ $fallbacks[] | {name: .name, value: $ENV[.from], type: "PLAINTEXT"} ]
             | reduce .[] as $e ({}; .[$e.name] = $e) | [.[]]' <<< "$ENV_VARS" > "$ENV_FILE"
-          echo "CodeBuild env: $(jq -r 'map("\(.name):\(.type // "PLAINTEXT")") | join(" ")' "$ENV_FILE")"
+          echo "CodeBuild env: $(jq -r 'map("\(.name):\(.type // "PLAINTEXT")" + (if .value == "" then "(empty)" else "" end)) | join(" ")' "$ENV_FILE")"
 
           # Integers first, before ANY arithmetic. `[[ -gt ]]` and (( )) abort
           # the step with a raw bash error on an empty, fractional or
@@ -712,10 +760,12 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           # An SSM parameter CodeBuild cannot resolve fails the build before any
-          # log stream exists, so name the failing phase and its reason here.
+          # log stream exists, so name the failing phase and its reason here. The
+          # reason is kept on one line so it cannot start a workflow command.
           if [[ "$buildStatus" != "SUCCEEDED" && "$buildStatus" != "IN_PROGRESS" ]]; then
             jq -r '.builds[0].phases[]? | select(.phaseStatus != null and .phaseStatus != "SUCCEEDED")
-              | "::error::CodeBuild \(.phaseType) \(.phaseStatus): \([.contexts[]?.message // empty] | join("; "))"' \
+              | "::error::CodeBuild \(.phaseType) \(.phaseStatus): \([.contexts[]?.message // empty] | join("; "))"
+              | gsub("%"; "%25") | gsub("[\r\n]+"; " ")' \
               <<< "$buildInfo" || true
           fi
 

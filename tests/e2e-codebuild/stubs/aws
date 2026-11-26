@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Stub aws for run.sh. Records every argv, captures file:// payloads, and plays back
+# a put-parameter outcome chosen by STUB_PUT (or STUB_PUT_<leaf>): a comma-separated
+# list, one entry per attempt on that parameter, the last entry repeating.
+set -u
+
+{ printf 'CALL:'; printf ' [%s]' "$@"; printf '\n'; } >> "$STUB_DIR/argv.log"
+perms() { ls -ld "$1" | cut -c1-10; }
+
+if [[ "${1:-} ${2:-}" == "ssm put-parameter" ]]; then
+  name="" file=""
+  while (( $# )); do
+    case "$1" in
+      --name) name="$2"; shift ;;
+      --value)
+        [[ "$2" == file://* ]] || echo "VALUE_NOT_FILE" >> "$STUB_DIR/puts.log"
+        file="${2#file://}"; shift ;;
+    esac
+    shift
+  done
+  leaf="${name##*/}"
+  cp "$file" "$STUB_DIR/put.$leaf.value"
+  echo "PUT $name file=$(perms "$file") dir=$(perms "$(dirname "$file")")" >> "$STUB_DIR/puts.log"
+
+  attempt=$(( $(cat "$STUB_DIR/attempts.$leaf" 2>/dev/null || echo 0) + 1 ))
+  echo "$attempt" > "$STUB_DIR/attempts.$leaf"
+  plan_var="STUB_PUT_${leaf//-/_}"
+  IFS=, read -r -a plan <<< "${!plan_var:-${STUB_PUT:-ok}}"
+  (( attempt > ${#plan[@]} )) && attempt=${#plan[@]}
+  mode="${plan[$((attempt - 1))]}"
+
+  who="User: arn:aws:sts::123456789012:assumed-role/gha-tdp-e2e-development/e2e-codebuild"
+  what="ssm:PutParameter on resource: arn:aws:ssm:us-east-2:123456789012:parameter$name"
+  denied() { echo >&2; echo "An error occurred (AccessDeniedException) when calling the PutParameter operation: $1" >&2; exit 254; }
+  failed() { echo >&2; echo "An error occurred ($1) when calling the PutParameter operation: $2" >&2; exit 254; }
+  case "$mode" in
+    ok) echo '{"Version": 7, "Tier": "Standard"}'; exit 0 ;;
+    denied) denied "$who is not authorized to perform: $what because no identity-based policy allows the ssm:PutParameter action" ;;
+    denied-short) denied "$who is not authorized to perform: $what" ;;
+    explicit) denied "$who is not authorized to perform: $what with an explicit deny in a service control policy" ;;
+    scp) denied "$who is not authorized to perform: $what because no service control policy allows the ssm:PutParameter action" ;;
+    boundary) denied "$who is not authorized to perform: $what because no permissions boundary allows the ssm:PutParameter action" ;;
+    kms) denied "$who is not authorized to perform: kms:GenerateDataKey on resource: arn:aws:kms:us-east-2:123456789012:key/00000000-0000-0000-0000-000000000000 because no identity-based policy allows the kms:GenerateDataKey action" ;;
+    toomany) failed TooManyUpdates "There are concurrent updates for a resource that supports one update at a time." ;;
+    throttle) failed ThrottlingException "Rate exceeded" ;;
+    validation) failed ValidationException "100% bad value $(cat "$file")" ;;
+    othercall) echo "An error occurred (AccessDeniedException) when calling the GetParameter operation: is not authorized to perform: ssm:PutParameter" >&2; exit 254 ;;
+    network) echo >&2; echo 'Could not connect to the endpoint URL: "https://ssm.us-east-2.amazonaws.com/"' >&2; exit 255 ;;
+    *) echo "stub aws: unknown mode '$mode'" >&2; exit 99 ;;
+  esac
+fi
+
+if [[ "${1:-} ${2:-}" == "codebuild start-build" ]]; then
+  while (( $# )); do
+    if [[ "$1" == "--environment-variables-override" ]]; then
+      [[ "$2" == file://* ]] || echo "ENV_NOT_FILE" >> "$STUB_DIR/puts.log"
+      cp "${2#file://}" "$STUB_DIR/start-env.json"
+      echo "ENVFILE file=$(perms "${2#file://}")" >> "$STUB_DIR/puts.log"
+    fi
+    shift
+  done
+  echo '{"build":{"id":"tdp-e2e:11111111-2222"}}'
+  exit 0
+fi
+
+if [[ "${1:-} ${2:-}" == "codebuild batch-get-builds" ]]; then
+  cat "$STUB_BUILDINFO"
+fi
+exit 0

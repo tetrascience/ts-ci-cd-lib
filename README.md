@@ -311,6 +311,7 @@ phases:
 | `timeout_minutes` | No | `25` | Max minutes for the E2E job |
 | `passthrough_env` | No | | Extra **non-secret** env vars for the run, one `NAME=VALUE` per line. Secret-like names are rejected. See below. |
 | `gh_environment` | No | | GitHub Environment to source per-env config from. The e2e job runs in it and forwards every `E2E_*` **variable** into the run. See below. |
+| `allow_plaintext_fallback` | No | `true` | What to do when the e2e role may not write a credential to SSM. `true` sends it as a `PLAINTEXT` override and warns; `false` fails the run. See Infrastructure below. |
 
 #### Secrets
 
@@ -337,16 +338,28 @@ when the build starts, so the start-build request and the build record (what
 | `ZEPHYR_API_TOKEN` | `ZEPHYR_API_TOKEN` | `/tdp/e2e/ci/<repo>/zephyr-api-token` |
 | `E2E_USER_PASSWORD` | `E2E_USER_PASSWORD` | `/tdp/e2e/ci/<repo>/e2e-user-password` |
 
-`<repo>` is the calling repository's name without the owner, so repos cannot overwrite each
-other's values. Things to know:
+`<repo>` is the calling repository's name without the owner, so repos do not collide. That is
+a naming convention, not isolation: any workflow in the organisation that can assume the e2e
+role can overwrite these parameters, or read them through a build it starts. That is the trust
+boundary the role already has, since it can start `tdp-e2e` builds. Things to know:
 
 - **Nothing is seeded by hand.** Every run writes the parameters again, so an account that was
   wiped needs no repair, and **rotating the GitHub secret is the only rotation step**.
 - **The value stays in SSM** after the run, encrypted with the account's `aws/ssm` key, until
   the next run overwrites it. It is not deleted, because a parallel run of the same repo may
-  still be starting its build.
-- **An empty or absent secret** writes nothing and sends no variable. Omitting the Zephyr
-  token leaves the buildspec's own `/tdp/e2e/zephyr/api-token` lookup in charge.
+  still be starting its build. A parameter also stays when a caller stops passing the secret,
+  and SSM keeps earlier versions in the parameter's history, so a rotated-out value remains
+  there until it ages out.
+- **One value per repository, credential and account.** Two workflows of one repo must not pass
+  different values for the same secret into the same account at the same time: the later write
+  wins for both builds. Concurrent writes of the same value are fine; a write that SSM rejects
+  as concurrent or throttled is retried up to five times.
+- **An empty or absent secret** writes nothing. `JFROG_ARTIFACTORY_AUTH` is then sent empty and
+  the other two are not sent, so omitting the Zephyr token leaves the buildspec's own
+  `/tdp/e2e/zephyr/api-token` lookup in charge. These three names are reserved: `passthrough_env`
+  and Environment vars cannot set them.
+- **A value over 4096 bytes fails the run** with a message naming the variable. That is what an
+  SSM Standard-tier parameter holds.
 - **The value never appears** in a command line or the Actions log: it goes to the AWS CLI
   through a private temporary file that is removed when the step ends.
 - **A write that fails stops the run** before the build starts, with one exception, described
@@ -468,11 +481,19 @@ this workflow assumes, `gha-tdp-e2e-<env>`, must allow `ssm:PutParameter` on
 `/tdp/e2e/*`, and the default `aws/ssm` key needs no extra grant.
 
 In an account whose stack predates that permission, the write is denied. The run then sends
-that credential the old way, as a `PLAINTEXT` override, and emits a warning naming the variable
-and the missing permission. The suite still runs, but the value is stored in cleartext in the
-CodeBuild build record, readable by anyone with `codebuild:BatchGetBuilds` or console access
-in that account, until the stack is updated. Only an access-denied error falls back; any other
-failure to write (throttling, validation, network) fails the run before the build starts.
+that credential the old way, as a `PLAINTEXT` override, and reports it in a warning and in the
+job summary, naming the variable and the missing permission. The suite still runs, but the
+value is stored in cleartext in the CodeBuild build record, readable by anyone with
+`codebuild:BatchGetBuilds` or console access in that account, until the stack is updated.
+
+Only that one case falls back: an access-denied error saying the role has no policy allowing
+`ssm:PutParameter`. Any other denial (KMS, an explicit deny, a service control policy, a
+permissions boundary) and any other failure to write (validation, network, or throttling that
+outlasts the retries) fails the run before the build starts.
+
+Set `allow_plaintext_fallback: false` to fail in that case as well. The default is `true` only
+to cover the rollout of the permission, and is meant to flip to `false` once every account
+has it.
 
 ## Actions
 
