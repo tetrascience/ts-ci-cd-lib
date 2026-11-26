@@ -76,8 +76,7 @@ on:
           do not opt in are unchanged. This is how per-environment non-secret config
           reaches CodeBuild, since a `uses:` caller cannot attach to an Environment.
           Environment SECRETS do not reach a reusable workflow, so the password
-          comes from e2e_user_password_parameter below or, when that is empty,
-          from the deprecated E2E_USER_PASSWORD secret (a repo or org secret).
+          comes from the E2E_USER_PASSWORD secret input (a repo or org secret).
         type: string
         default: ""
         required: false
@@ -90,40 +89,12 @@ on:
         type: string
         default: ""
         required: false
-      jfrog_auth_parameter:
-        description: |
-          SSM parameter in the target account holding the JFrog npm auth, sent to
-          CodeBuild as a PARAMETER_STORE reference: CodeBuild resolves it at build
-          start, so the value is never in the start-build request or the build
-          record. Must be under /tdp/e2e/. Set to "" to send the
-          JFROG_ARTIFACTORY_READ_NPM_AUTH secret instead, as PLAINTEXT.
-        type: string
-        default: "/tdp/e2e/jfrog/npm-read-auth"
-        required: false
-      zephyr_api_token_parameter:
-        description: |
-          SSM parameter holding the Zephyr Scale API token, sent the same way as
-          jfrog_auth_parameter. Takes precedence over the ZEPHYR_API_TOKEN secret;
-          when empty, that deprecated secret is still sent as PLAINTEXT if passed.
-          Leave both unset to let the buildspec do its own lookup.
-        type: string
-        default: ""
-        required: false
-      e2e_user_password_parameter:
-        description: |
-          SSM parameter holding the dedicated e2e user's password, sent the same way
-          as jfrog_auth_parameter. Takes precedence over the E2E_USER_PASSWORD secret;
-          when empty, that deprecated secret is still sent as PLAINTEXT if passed.
-          Conventionally /tdp/e2e/<repo>/e2e-user-password.
-        type: string
-        default: ""
-        required: false
     secrets:
       JFROG_ARTIFACTORY_NPM_VIRTUAL_URL:
         required: true
       JFROG_ARTIFACTORY_READ_NPM_AUTH:
-        description: "Legacy. Used only when jfrog_auth_parameter is set to \"\", and then sent to CodeBuild as PLAINTEXT, so its value is stored in the build record."
-        required: false
+        description: "JFrog npm read auth. When non-empty, the e2e job stores it as an SSM SecureString under /tdp/e2e/ci/<repo>/ in the target account and CodeBuild reads it from there as JFROG_ARTIFACTORY_AUTH. May be empty: then nothing is stored or sent."
+        required: true
       GITHUB_PAT:
         description: "PAT with cross-repo access and contents:write for deploy push"
         required: true
@@ -131,13 +102,13 @@ on:
         description: "Optional per-repo Zephyr Scale cycle key. When set, it is passed into the CodeBuild env and takes precedence over the account-scoped SSM cycle key, so a repo's execution results land in its own cycle. Omit to keep the SSM default."
         required: false
       ZEPHYR_API_TOKEN:
-        description: "Deprecated: use zephyr_api_token_parameter. Sent to CodeBuild as PLAINTEXT, so its value is stored in the build record. Ignored when zephyr_api_token_parameter is set."
+        description: "Optional Zephyr Scale API token. Reaches CodeBuild through SSM, the same way as JFROG_ARTIFACTORY_READ_NPM_AUTH. Omit to leave the buildspec's own lookup in charge."
         required: false
       ZEPHYR_ACCOUNT_ID:
         description: "Optional Jira account id used for Zephyr executedById. Same precedence as ZEPHYR_CYCLE_KEY."
         required: false
       E2E_USER_PASSWORD:
-        description: "Deprecated: use e2e_user_password_parameter. Sent to CodeBuild as PLAINTEXT, so its value is stored in the build record. Ignored when e2e_user_password_parameter is set."
+        description: "Optional password for a dedicated e2e login user. Reaches CodeBuild through SSM, the same way as JFROG_ARTIFACTORY_READ_NPM_AUTH. Must be a repo or org secret: Environment secrets do not reach a reusable workflow (only its vars do, via gh_environment)."
         required: false
       SLACK_WEBHOOK_URL:
         description: "Optional Slack incoming webhook. When set, a failing run posts one message to that webhook's channel; when unset the notify job no-ops, so an unconfigured caller is unaffected and Slack can never turn a run red. Because the webhook is channel-locked, passing it conditionally is also how a caller scopes WHICH runs alert: pass it only when the resolved environment is one you want notified."
@@ -454,11 +425,12 @@ jobs:
           ZEPHYR_CYCLE_KEY: ${{ secrets.ZEPHYR_CYCLE_KEY }}
           ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
           ZEPHYR_ACCOUNT_ID: ${{ secrets.ZEPHYR_ACCOUNT_ID }}
-          JFROG_AUTH_PARAMETER: ${{ inputs.jfrog_auth_parameter }}
-          ZEPHYR_API_TOKEN_PARAMETER: ${{ inputs.zephyr_api_token_parameter }}
-          E2E_USER_PASSWORD_PARAMETER: ${{ inputs.e2e_user_password_parameter }}
+          # The CALLING repository (owner/name): in a reusable workflow the github
+          # context is the caller's. Its name scopes the SSM parameters below.
+          CALLER_REPOSITORY: ${{ github.repository }}
           TARGET_ACCOUNT: ${{ steps.env.outputs.account }}
           TARGET_REGION: ${{ steps.env.outputs.region }}
+          TARGET_CF_ENV: ${{ steps.env.outputs.cf_env }}
           PASSTHROUGH_ENV: ${{ inputs.passthrough_env }}
           # E2E_* config visible to the job (org, repo, and the selected
           # Environment, the Environment winning) as JSON; the script forwards it
@@ -469,6 +441,8 @@ jobs:
           E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}
         run: |
           set -euo pipefail
+          # Never trace this step: xtrace would print secret values as they are expanded.
+          set +x
 
           ENV_VARS='[]'
 
@@ -562,40 +536,64 @@ jobs:
               {"name":"JFROG_ARTIFACTORY_URL","value":$url}
             ]')
 
-          # Secrets. With a parameter set, CodeBuild resolves the value from SSM
-          # at build start (PARAMETER_STORE), so only the parameter NAME is in the
-          # request and the build record. The PLAINTEXT fallback stores the value
-          # in the build record, readable by anyone with BatchGetBuilds.
+          # Secrets. Each non-empty one is written to an SSM SecureString scoped to
+          # the calling repo and sent as a PARAMETER_STORE reference, so the request
+          # and the build record hold only the parameter NAME. The parameter is left
+          # in place: deleting it would race a parallel run of the same repo.
+          umask 077
+          SECRET_TMP=$(mktemp -d "${RUNNER_TEMP:-/tmp}/e2e-secrets.XXXXXX")
+          trap 'rm -rf "$SECRET_TMP"' EXIT
+          PLAINTEXT_FALLBACKS='[]'
           add_secret() {
-            local name="$1" parameter="$2" parameter_input="$3" secret_input="$4" value="$5"
-            if [[ -n "$parameter" ]]; then
-              # SSM's own name rules, so a bad name fails here and not at build start:
-              # non-empty segments of [A-Za-z0-9_.-], at most 15 levels, and at most
-              # 1011 characters counted as the ARN. /tdp/e2e/ also excludes aws/ssm.
-              local levels arn
-              levels=$(tr -cd / <<< "$parameter")
-              arn="arn:aws:ssm:${TARGET_REGION}:${TARGET_ACCOUNT}:parameter${parameter}"
-              if [[ ! "$parameter" =~ ^/tdp/e2e(/[A-Za-z0-9_.-]+)+$ ]] || (( ${#levels} > 15 || ${#arn} > 1011 )); then
-                echo "::error::$parameter_input must be an SSM parameter name under /tdp/e2e/, the only path the tdp-e2e CodeBuild role can read: non-empty segments of letters, digits, '.', '-' or '_', at most 15 levels, and at most 1011 characters including the parameter ARN (got '$parameter')"
-                exit 1
-              fi
-              if [[ -n "$value" ]]; then
-                echo "$name: resolved by CodeBuild from SSM $parameter; the $secret_input secret is not sent."
-              fi
+            local name="$1" from="$2" leaf="$3"
+            local value="${!from:-}" repo parameter err code rc=0
+            [[ -n "$value" ]] || return 0
+
+            # GitHub only allows these characters in a repository name, and they
+            # are all valid in an SSM name; anything else is refused, not rewritten.
+            repo="${CALLER_REPOSITORY#*/}"
+            if [[ ! "$repo" =~ ^[A-Za-z0-9_.-]{1,100}$ || "$repo" == "." || "$repo" == ".." ]]; then
+              echo "::error::Cannot derive an SSM parameter name from the repository name '$repo': expected 1-100 letters, digits, '.', '-' or '_', and not '.' or '..'."
+              exit 1
+            fi
+            parameter="/tdp/e2e/ci/${repo}/${leaf}"
+
+            # The value goes through a 0600 file (umask above; printf is a builtin), never argv.
+            printf '%s' "$value" > "$SECRET_TMP/value"
+            err=$(AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=5 aws ssm put-parameter \
+              --name "$parameter" --type SecureString --overwrite \
+              --value "file://$SECRET_TMP/value" 2>&1 >/dev/null) || rc=$?
+            if (( rc == 0 )); then
+              echo "$name: stored in SSM $parameter; CodeBuild resolves it at build start."
               ENV_VARS=$(jq -nc --arg n "$name" --arg p "$parameter" --argjson base "$ENV_VARS" \
                 '$base + [{"name":$n,"value":$p,"type":"PARAMETER_STORE"}]')
-            elif [[ -n "$value" ]]; then
-              echo "::warning::$name is sent to CodeBuild as PLAINTEXT from the $secret_input secret, so its value is stored in the build record. Set $parameter_input to an SSM parameter under /tdp/e2e/ instead."
-              ENV_VARS=$(jq -nc --arg n "$name" --arg v "$value" --argjson base "$ENV_VARS" \
-                '$base + [{"name":$n,"value":$v,"type":"PLAINTEXT"}]')
+              return 0
             fi
+
+            code=""
+            if [[ "$err" =~ An\ error\ occurred\ \(([A-Za-z0-9._]+)\)\ when\ calling\ the\ PutParameter\ operation ]]; then
+              code="${BASH_REMATCH[1]}"
+            fi
+            # Only a missing permission falls back: the role gets ssm:PutParameter
+            # from the tdp-e2e stack, which may not be deployed in this account yet.
+            # The value is added at the very end, so it stays out of jq's argv too.
+            if [[ "$code" == "AccessDeniedException" || "$code" == "AccessDenied" ]]; then
+              echo "::warning::$name is sent to CodeBuild as PLAINTEXT, so its value is stored in the CodeBuild build record: role gha-tdp-e2e-${TARGET_CF_ENV} in account ${TARGET_ACCOUNT} (${TARGET_REGION}) is not allowed ssm:PutParameter on parameter/tdp/e2e/ci/*. Deploy the tdp-e2e stack update that grants it to send a reference instead."
+              PLAINTEXT_FALLBACKS=$(jq -nc --arg n "$name" --arg f "$from" --argjson base "$PLAINTEXT_FALLBACKS" \
+                '$base + [{"name":$n,"from":$f}]')
+              return 0
+            fi
+
+            # Anything else (throttling, validation, network) fails before start-build.
+            err="${err//"$value"/***}"
+            err="${err//%/%25}"
+            err="${err//$'\r'/ }"
+            echo "::error::Could not store $name in SSM parameter $parameter (${code:-no AWS error code}): ${err//$'\n'/ }"
+            exit 1
           }
-          add_secret JFROG_ARTIFACTORY_AUTH "$JFROG_AUTH_PARAMETER" \
-            jfrog_auth_parameter JFROG_ARTIFACTORY_READ_NPM_AUTH "${JFROG_AUTH:-}"
-          add_secret ZEPHYR_API_TOKEN "$ZEPHYR_API_TOKEN_PARAMETER" \
-            zephyr_api_token_parameter ZEPHYR_API_TOKEN "${ZEPHYR_API_TOKEN:-}"
-          add_secret E2E_USER_PASSWORD "$E2E_USER_PASSWORD_PARAMETER" \
-            e2e_user_password_parameter E2E_USER_PASSWORD "${E2E_USER_PASSWORD:-}"
+          add_secret JFROG_ARTIFACTORY_AUTH JFROG_AUTH jfrog-npm-read-auth
+          add_secret ZEPHYR_API_TOKEN ZEPHYR_API_TOKEN zephyr-api-token
+          add_secret E2E_USER_PASSWORD E2E_USER_PASSWORD e2e-user-password
 
           # Caller-supplied Zephyr settings, forwarded only when set so the
           # buildspec can prefer them over its own defaults.
@@ -611,11 +609,15 @@ jobs:
             fi
           done
 
-          # De-dupe last-wins: two entries with the same name make start-build
-          # reject the whole request. Reserved vars are appended last, so they
-          # win any collision. Whole entries are kept so `type` survives.
-          ENV_VARS=$(jq -c 'reduce .[] as $e ({}; .[$e.name] = $e) | [.[]]' <<< "$ENV_VARS")
-          echo "CodeBuild env: $(jq -r 'map("\(.name):\(.type // "PLAINTEXT")") | join(" ")' <<< "$ENV_VARS")"
+          # De-dupe last-wins (start-build rejects duplicate names; reserved vars
+          # are appended last, so they win), keeping whole entries so `type` survives.
+          # Written to a file, with fallback values read by jq from the environment,
+          # so no secret value is ever a command-line argument.
+          ENV_FILE="$SECRET_TMP/environment-variables.json"
+          jq -c --argjson fallbacks "$PLAINTEXT_FALLBACKS" '
+            . + [ $fallbacks[] | {name: .name, value: $ENV[.from], type: "PLAINTEXT"} ]
+            | reduce .[] as $e ({}; .[$e.name] = $e) | [.[]]' <<< "$ENV_VARS" > "$ENV_FILE"
+          echo "CodeBuild env: $(jq -r 'map("\(.name):\(.type // "PLAINTEXT")") | join(" ")' "$ENV_FILE")"
 
           # Integers first, before ANY arithmetic. `[[ -gt ]]` and (( )) abort
           # the step with a raw bash error on an empty, fractional or
@@ -654,7 +656,7 @@ jobs:
             --source-type-override S3
             --source-location-override "$S3_LOCATION"
             --buildspec-override "$BUILDSPEC_PATH"
-            --environment-variables-override "$ENV_VARS")
+            --environment-variables-override "file://$ENV_FILE")
 
           if [[ -n "$IMAGE_OVERRIDE" ]]; then
             CMD+=(--image-override "$IMAGE_OVERRIDE")

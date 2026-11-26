@@ -267,7 +267,7 @@ Each service provides its own `buildspec.e2e.yml`. The workflow passes the follo
 |----------|-------------|
 | `E2E_ENVIRONMENT` | Target environment name (e.g. `predev3`, `dev`) |
 | `JFROG_ARTIFACTORY_URL` | JFrog npm registry URL |
-| `JFROG_ARTIFACTORY_AUTH` | JFrog npm credentials, resolved by CodeBuild from the SSM parameter named by `jfrog_auth_parameter` (see Secrets below) |
+| `JFROG_ARTIFACTORY_AUTH` | JFrog npm credentials, resolved by CodeBuild from SSM (see Secrets below). Absent when the caller's secret is empty. |
 
 Authentication is handled by each service's test setup (e.g. a `globalSetup` that reads the TDP admin password from SSM and logs in). The CodeBuild IAM role has access to read SSM parameters under `/tetrascience/{environment}/platform/ADMIN_PASSWORD`.
 
@@ -311,50 +311,49 @@ phases:
 | `timeout_minutes` | No | `25` | Max minutes for the E2E job |
 | `passthrough_env` | No | | Extra **non-secret** env vars for the run, one `NAME=VALUE` per line. Secret-like names are rejected. See below. |
 | `gh_environment` | No | | GitHub Environment to source per-env config from. The e2e job runs in it and forwards every `E2E_*` **variable** into the run. See below. |
-| `jfrog_auth_parameter` | No | `/tdp/e2e/jfrog/npm-read-auth` | SSM parameter holding the JFrog npm auth. `""` falls back to the legacy secret. See Secrets below. |
-| `zephyr_api_token_parameter` | No | | SSM parameter holding the Zephyr Scale API token |
-| `e2e_user_password_parameter` | No | | SSM parameter holding the dedicated e2e user's password, e.g. `/tdp/e2e/<repo>/e2e-user-password` |
 
 #### Secrets
-
-Credentials reach CodeBuild as **SSM parameter references**, not values. Each `*_parameter`
-input above names a SecureString in the target account; the workflow sends it as a
-`PARAMETER_STORE` environment variable and CodeBuild resolves it with its own role when the
-build starts. The start-build request and the build record (what `batch-get-builds` and the
-console show) hold only the parameter name.
-
-| Variable | Input | Default parameter |
-|----------|-------|-------------------|
-| `JFROG_ARTIFACTORY_AUTH` | `jfrog_auth_parameter` | `/tdp/e2e/jfrog/npm-read-auth` |
-| `ZEPHYR_API_TOKEN` | `zephyr_api_token_parameter` | none |
-| `E2E_USER_PASSWORD` | `e2e_user_password_parameter` | none |
-
-Parameters must be under `/tdp/e2e/`, the only path the `tdp-e2e` CodeBuild role can read.
-Names are checked against SSM's own rules before the build starts: non-empty segments of letters,
-digits, `.`, `-` and `_`, at most 15 levels, and at most 1011 characters counting the parameter
-ARN. A parameter must also exist in the target account and region before a run, or the build
-fails at start; the workflow then prints the failing phase and CodeBuild's reason. The JFrog
-default is used on every run, so it must be seeded in every account that runs e2e.
 
 | Secret | Required | Description |
 |--------|----------|-------------|
 | `JFROG_ARTIFACTORY_NPM_VIRTUAL_URL` | **Yes** | JFrog npm registry URL |
+| `JFROG_ARTIFACTORY_READ_NPM_AUTH` | **Yes** | JFrog npm read auth. May be empty for a suite that does not install from JFrog. |
 | `GITHUB_PAT` | **Yes** | PAT for cross-repo access + deploy push |
+| `ZEPHYR_API_TOKEN` | No | Zephyr Scale API token |
+| `E2E_USER_PASSWORD` | No | Password of a dedicated e2e login user. Repo or org secret only. |
 | `ZEPHYR_CYCLE_KEY` | No | Cycle to record into |
 | `ZEPHYR_ACCOUNT_ID` | No | Jira account id for `executedById` |
-| `JFROG_ARTIFACTORY_READ_NPM_AUTH` | No | Legacy. Used only with `jfrog_auth_parameter: ""`. |
-| `ZEPHYR_API_TOKEN` | No | Deprecated, use `zephyr_api_token_parameter` |
-| `E2E_USER_PASSWORD` | No | Deprecated, use `e2e_user_password_parameter` |
 
-The last three are the legacy path. They are sent only when non-empty and no parameter is set
-for them, and then as `PLAINTEXT`: masked in the Actions log, but stored in cleartext in the
-CodeBuild build record, readable by anyone with `codebuild:BatchGetBuilds` or console access
-in that account. The run emits a warning when this happens. When a parameter is set, the
-matching secret is ignored and never sent.
+GitHub secrets are the source of truth, and callers pass them as before. Credentials reach
+CodeBuild as **SSM parameter references**, not values: before each build the e2e job writes
+every non-empty credential to a SecureString in the target account and sends CodeBuild only
+its name, as a `PARAMETER_STORE` environment variable. CodeBuild resolves it with its own role
+when the build starts, so the start-build request and the build record (what
+`batch-get-builds` and the console show) hold only the parameter name.
+
+| Secret | Variable in the build | Parameter |
+|--------|-----------------------|-----------|
+| `JFROG_ARTIFACTORY_READ_NPM_AUTH` | `JFROG_ARTIFACTORY_AUTH` | `/tdp/e2e/ci/<repo>/jfrog-npm-read-auth` |
+| `ZEPHYR_API_TOKEN` | `ZEPHYR_API_TOKEN` | `/tdp/e2e/ci/<repo>/zephyr-api-token` |
+| `E2E_USER_PASSWORD` | `E2E_USER_PASSWORD` | `/tdp/e2e/ci/<repo>/e2e-user-password` |
+
+`<repo>` is the calling repository's name without the owner, so repos cannot overwrite each
+other's values. Things to know:
+
+- **Nothing is seeded by hand.** Every run writes the parameters again, so an account that was
+  wiped needs no repair, and **rotating the GitHub secret is the only rotation step**.
+- **The value stays in SSM** after the run, encrypted with the account's `aws/ssm` key, until
+  the next run overwrites it. It is not deleted, because a parallel run of the same repo may
+  still be starting its build.
+- **An empty or absent secret** writes nothing and sends no variable. Omitting the Zephyr
+  token leaves the buildspec's own `/tdp/e2e/zephyr/api-token` lookup in charge.
+- **The value never appears** in a command line or the Actions log: it goes to the AWS CLI
+  through a private temporary file that is removed when the step ends.
+- **A write that fails stops the run** before the build starts, with one exception, described
+  under Infrastructure: a missing `ssm:PutParameter` permission falls back to `PLAINTEXT`.
 
 The Zephyr cycle key and account id are identifiers, not credentials, so they stay plaintext
-and are forwarded only when non-empty. Omitting the Zephyr token entirely leaves the buildspec's
-own `/tdp/e2e/zephyr/api-token` lookup in charge.
+and are forwarded only when non-empty.
 
 #### Passing per-environment config
 
@@ -368,9 +367,8 @@ visible to the job** (org, repo, and the selected Environment, with the Environm
 the run, with no per-variable wiring here. Add a new `E2E_*` var and it flows through
 automatically. When `gh_environment` is unset nothing is forwarded, so callers that do not opt in
 are unchanged. `E2E_USER_PASSWORD` is never forwarded as a variable even if set as one. It travels
-through `e2e_user_password_parameter` or, when that is empty, through the deprecated
-`E2E_USER_PASSWORD` secret, which is sent as `PLAINTEXT` (see Secrets). A `uses:` caller cannot read
-Environment `vars` itself, which is why this reads them inside the job.
+through the `E2E_USER_PASSWORD` secret (see Secrets), which must be a repo or org secret. A
+`uses:` caller cannot read Environment `vars` itself, which is why this reads them inside the job.
 
 ```yaml
 with:
@@ -378,8 +376,8 @@ with:
   deploy_paths: ''
   buildspec: buildspec.e2e.yml
   gh_environment: uat        # forwards every E2E_* var visible to the job
-  # a SecureString in the uat account; CodeBuild resolves it, the value never leaves AWS
-  e2e_user_password_parameter: /tdp/e2e/my-service/e2e-user-password
+secrets:
+  E2E_USER_PASSWORD: ${{ secrets.E2E_USER_PASSWORD }}   # repo or org secret
 ```
 
 **`passthrough_env` (for literal or repo-level values).** One `NAME=VALUE` per line, blanks
@@ -464,10 +462,17 @@ per-call overrides, and uploads are namespaced by repo name.
 The workflow derives the role and bucket names by convention, so an environment's
 `CF_ENVIRONMENTS` entry must match that stack's `EnvironmentName`.
 
-Each account also needs the SSM SecureStrings the run references (see Secrets above), at
-minimum `/tdp/e2e/jfrog/npm-read-auth`. SecureStrings cannot be created by CloudFormation, so
-they are seeded by hand by someone with SSM write access in that account. The stack's
-CodeBuild role already reads `/tdp/e2e/*`, and the default `aws/ssm` key needs no extra grant.
+The credential parameters (see Secrets above) need no seeding, only one permission: the role
+this workflow assumes, `gha-tdp-e2e-<env>`, must allow `ssm:PutParameter` on
+`parameter/tdp/e2e/ci/*`. An up-to-date stack grants it. The CodeBuild role already reads
+`/tdp/e2e/*`, and the default `aws/ssm` key needs no extra grant.
+
+In an account whose stack predates that permission, the write is denied. The run then sends
+that credential the old way, as a `PLAINTEXT` override, and emits a warning naming the variable
+and the missing permission. The suite still runs, but the value is stored in cleartext in the
+CodeBuild build record, readable by anyone with `codebuild:BatchGetBuilds` or console access
+in that account, until the stack is updated. Only an access-denied error falls back; any other
+failure to write (throttling, validation, network) fails the run before the build starts.
 
 ## Actions
 
