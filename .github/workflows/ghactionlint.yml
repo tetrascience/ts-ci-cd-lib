@@ -86,4 +86,22 @@ jobs:
           # Token enables online audits (stale action refs, known-vulnerable
           # versions). Offline audits still run without it.
           GH_TOKEN: ${{ github.token }}
-        run: ./zizmor --format plain .
+        # zizmor exits 1 when an audit cannot run at all, e.g. an online audit
+        # whose token cannot see an internal repo the caller references. Then
+        # re-run the offline audits instead of reporting no audit. Findings
+        # (11-14) and every other non-zero exit still fail the job.
+        run: |
+          set -euo pipefail
+          log=$(mktemp)
+          rc=0
+          ./zizmor --format plain . 2> "$log" || rc=$?
+          cat "$log" >&2
+          if [[ "$rc" -eq 1 ]]; then
+            # zizmor's last "Caused by" line names the root cause.
+            reason=$( { grep -v '^[[:space:]]*$' "$log" || true; } | tail -n 1 | sed -E 's/^[[:space:]]*[0-9]+: //; s/%/%25/g')
+            reason="${reason:-see the zizmor error above}"
+            echo "::warning title=zizmor online audits skipped::zizmor could not run its online audits (${reason}), so this result is from the offline audits only. impostor-commit, known-vulnerable-actions, ref-confusion and stale-action-refs did not run."
+            rc=0
+            ./zizmor --format plain --no-online-audits . || rc=$?
+          fi
+          exit "$rc"

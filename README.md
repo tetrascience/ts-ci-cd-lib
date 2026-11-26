@@ -11,6 +11,7 @@ Reusable CI/CD workflows for TetraScience repositories.
   - [check-links](#check-links)
   - [e2e-codebuild](#e2e-codebuild)
 - [Actions](#actions)
+  - [coverage-check](#coverage-check)
   - [install-jfrog-npm-package](#install-jfrog-npm-package)
 
 ## Workflows
@@ -39,6 +40,12 @@ jobs:
 | `zizmor_sha256` | SHA-256 of `zizmor-x86_64-unknown-linux-gnu.tar.gz` (must match `zizmor_version`) | No | pinned to default version |
 
 Both binaries are downloaded from GitHub release assets and verified against pinned SHA-256 hashes. To bump either tool, set the `*_version` input alongside the matching `*_sha256`.
+
+#### zizmor online audits
+
+zizmor runs with the caller's default `GITHUB_TOKEN`, which enables its online audits (`impostor-commit`, `known-vulnerable-actions`, `ref-confusion`, `stale-action-refs`). That token cannot see other private or internal repositories. If a workflow references one, for example an internal reusable workflow by branch, those audits cannot run and zizmor aborts with exit code 1 and no result.
+
+The workflow then re-runs zizmor with `--no-online-audits`, reports that result, and emits a warning naming the cause. Findings still fail the job, and so does any other error, including an error in the offline run. A broader token is deliberately not used. On a pull request from a branch in the same repository, that branch's own workflow files run with the token, so anyone who can push a branch could read it.
 
 ---
 
@@ -300,9 +307,9 @@ phases:
 | `deploy_workflow` | No | `ci.yml` | Workflow waited on after pushing to env branch |
 | `image_override` | No | | Override CodeBuild image |
 | `compute_type_override` | No | | Override CodeBuild compute (e.g. `BUILD_GENERAL1_MEDIUM`) |
-| `stream_codebuild_logs` | No | `false` | Stream raw CodeBuild logs into the GitHub Actions log |
+| `stream_codebuild_logs` | No | `false` | Stream raw CodeBuild logs into the GitHub Actions log. Values the build fetches itself (e.g. from SSM) are **not masked** there; the run warns when this is on. |
 | `timeout_minutes` | No | `25` | Max minutes for the E2E job |
-| `passthrough_env` | No | | Extra **non-secret** env vars for the run, one `NAME=VALUE` per line. See below. |
+| `passthrough_env` | No | | Extra **non-secret** env vars for the run, one `NAME=VALUE` per line. Secret-like names are rejected. See below. |
 | `gh_environment` | No | | GitHub Environment to source per-env config from. The e2e job runs in it and forwards every `E2E_*` **variable** into the run. See below. |
 | `jfrog_auth_parameter` | No | `/tdp/e2e/jfrog/npm-read-auth` | SSM parameter holding the JFrog npm auth. `""` falls back to the legacy secret. See Secrets below. |
 | `zephyr_api_token_parameter` | No | | SSM parameter holding the Zephyr Scale API token |
@@ -389,9 +396,22 @@ with:
 Precedence when a name comes from more than one source (last wins): `passthrough_env`, then
 Environment `E2E_*` vars, then the reserved vars this workflow controls (`E2E_ENVIRONMENT`,
 `JFROG_ARTIFACTORY_*`). So the Environment overrides passthrough, and the reserved vars override
-both. **Never put secrets in `passthrough_env`**: `with:` inputs are not masked in logs. Secrets
-go through declared `secrets:` inputs, which is why the password is separate. Unset values
+both. **Never put secrets in `passthrough_env`**: `with:` inputs are not masked in logs, and the
+values are stored as plaintext in the CodeBuild build record. Secrets go through the workflow's
+dedicated secret inputs, or the buildspec reads them from SSM under `/tdp/e2e/`. Unset values
 interpolate to empty and are dropped; have the suite treat blank as unset.
+
+As a tripwire, a name that looks like a secret fails the run before CodeBuild starts. Names are
+split on `_`, compared case-insensitively, and one trailing `S` is dropped from each segment, so
+every rule below covers the plural too. A name is rejected when a segment is, or ends in, `TOKEN`,
+`PASSWORD`, `PASSWD`, `SECRET` or `APIKEY`, or is `KEY`, `ACCESSKEY`, `PRIVATEKEY`, `SECRETKEY`
+or `PASSPHRASE`. Two exceptions keep identifiers usable: a singular `KEY` right after `CYCLE`,
+`PROJECT`, `ISSUE`, `SUBDOMAIN`, `CACHE`, `OBJECT`, `PARTITION` or `SORT` (e.g.
+`ZEPHYR_CYCLE_KEY`; `PROJECT_KEYS` is still rejected), and a name whose last segment refers to a
+secret rather than holding one: `ID`, `ARN`, `NAME`, `PATH`, `FILE`, `URL`, `URI`, `ENDPOINT`,
+`HOST`, `HEADER`, `PARAM`, `PARAMETER`, `TTL` or `TYPE`, singular or plural (e.g. `API_KEY_ID`,
+`SECRET_ARNS`). So `E2E_API_TOKEN`, `DB_PASSWDS` and `PROJECT_KEYS` fail while `KEYCLOAK_URL`,
+`TOKENIZER_MODEL`, `MONKEYS` and `API_KEY_ID` pass. Rename a benign variable that trips it.
 
 > **Buildspec authors:** a buildspec that assigns these unconditionally will clobber
 > what the workflow passes. Prefer the inbound value:
@@ -452,6 +472,63 @@ CodeBuild role already reads `/tdp/e2e/*`, and the default `aws/ssm` key needs n
 ## Actions
 
 Composite actions are referenced as a **step** (`uses:`) inside your own job, unlike the reusable workflows above (which are referenced at the job level).
+
+### coverage-check
+
+Posts a coverage comment on pull requests and enforces two rules: overall coverage must not regress, and new code must meet a threshold. On pushes to `main` it uploads `coverage-summary.json` as the base for later PR comparisons. It expects istanbul `json` and `json-summary` reports (Vitest: `coverage.reporter: ["json", "json-summary"]`).
+
+#### Usage
+
+Run it after the step that produces coverage:
+
+```yaml
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read # to download the base coverage artifact from main
+
+steps:
+  - uses: actions/checkout@v4
+  # ... install, then e.g. `yarn test:coverage`
+  - name: Coverage
+    uses: tetrascience/ts-ci-cd-lib/coverage-check@main
+    with:
+      new-code-threshold: "90"
+```
+
+#### Inputs
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `coverage-path` | Coverage output directory (with trailing slash) | No | `"coverage/"` |
+| `base-coverage-artifact-name` | Name of the base coverage artifact uploaded on `main` | No | `"base-coverage"` |
+| `base-retention-days` | Retention for the base coverage artifact | No | `"90"` |
+| `new-code-threshold` | Minimum statement coverage % for new code, per file (`0` disables) | No | `"85"` |
+| `new-code-mode` | `changed-lines`: measure only statements on lines the PR adds. `whole-file`: measure every touched file's whole coverage (the behaviour before SW-2733) | No | `"changed-lines"` |
+| `allowed-coverage-drop` | Percentage points overall line coverage may fall before the regression rule fails | No | `"0"` |
+| `source-file-pattern` | Grep regex selecting files the new-code rule applies to | No | `'^src/.*\.(ts\|tsx)$'` |
+| `source-file-exclude` | Grep regex excluding files from the new-code rule (empty excludes nothing). `index.ts`/`index.tsx` are always excluded | No | `'\.(test\|spec\|stories)\.(ts\|tsx)$'` |
+
+#### Regression rule
+
+The PR's line coverage is compared with the base on raw covered/total counts. It fails only when coverage fell by more than `allowed-coverage-drop` points **and** the PR leaves more lines uncovered than the base. Line totals move with formatting alone: reformatting a codebase can delete thousands of covered lines and lower the percentage while leaving fewer lines uncovered. That is not a regression.
+
+The base is the coverage artifact from the exact `main` commit the PR was measured on (the first parent of the `pull_request` merge commit, or `pull_request.base.sha` when the caller checks out the PR head). If that commit has no artifact yet, because its `main` run is still in progress or failed, the latest `main` artifact is used and the run logs a notice saying so.
+
+#### New-code rule
+
+In the default `changed-lines` mode, each changed source file is measured on the statements that sit on lines the PR **added**, taken from the `patch` in the pull request files API:
+
+- Files with no added lines (deletions only, pure renames, mode changes) are skipped.
+- Change blocks that only reformat code (whitespace and line breaks between tokens, trailing commas, line-ending semicolons that ASI makes optional, comments, quote style, `{" "}` JSX spacers, parentheses around a single arrow parameter, and parentheses wrapping a whole JSX block, return value, arrow body, right-hand side or ternary branch) do not count as added lines, so a Prettier run over legacy code passes. Other parentheses, string/template/regex contents, token-separating whitespace and semantically significant semicolons are compared as written, so `!(a && b)` vs `!a && b`, `a++ + b` vs `a + ++b` and `if (x); run()` vs `if (x) run()` all count as changes.
+- Added lines that hold no statements (imports, types, comments, braces) are skipped.
+- Each added line is attributed to the innermost statement(s) containing it (all of them when several sit side by side on the line), so covered enclosing statements (a component, a `return (…)`) cannot dilute a new, untested one.
+- Otherwise covered/changed statements, floored, must reach `new-code-threshold`. A failure lists each file as `covered/changed statements` with the uncovered line numbers, and annotates the first one.
+- When GitHub omits a file's `patch` (diffs that are too large), or the patch cannot be lined up with the checked-out file, that file falls back to whole-file coverage and the run logs a warning naming it.
+- Hunks are re-anchored against the checked-out file, so line numbers stay correct when CI measures the merge commit and `main` has moved since the branch point.
+- A PR with 3000 or more files fails: the files API stops at 3000, and a partial list would silently skip files.
+
+Set `new-code-mode: whole-file` to keep the previous behaviour, where any file the PR touches must meet the threshold on its whole statement coverage.
 
 ### install-jfrog-npm-package
 
